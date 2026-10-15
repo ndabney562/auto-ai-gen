@@ -7,6 +7,7 @@ on:
 
 # This privileged workflow never checks out or executes PR code.
 permissions:
+  actions: read
   contents: write
   pull-requests: write
 
@@ -66,11 +67,21 @@ jobs:
             }
 
             const pr = matching[0];
-            const { data: latest } = await github.rest.pulls.get({
-              owner, repo, pull_number: pr.number
-            });
-            if (latest.head.sha !== run.head_sha || latest.mergeable !== true) {
-              core.info('PR changed, conflicts exist, or mergeability is pending; not merging.');
+            // GitHub may take a few seconds to compute mergeability.
+            let latest;
+            for (let attempt = 0; attempt < 6; attempt++) {
+              ({ data: latest } = await github.rest.pulls.get({
+                owner, repo, pull_number: pr.number
+              }));
+              if (latest.head.sha !== run.head_sha || latest.state !== 'open') {
+                core.info('PR changed or closed; refusing stale merge.');
+                return;
+              }
+              if (latest.mergeable !== null) break;
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+            if (latest.mergeable !== true) {
+              core.info('PR has conflicts or GitHub did not confirm mergeability.');
               return;
             }
 
