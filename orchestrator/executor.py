@@ -38,9 +38,12 @@ def execute_claimed_task(
     *,
     audit_path: str | Path,
     heartbeat_seconds: float = 30,
+    lease_seconds: float = 120,
     provider_health_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Execute under a renewable lease; only verified orchestration can finish work."""
+    if not 0 < heartbeat_seconds < lease_seconds:
+        raise ValueError("Heartbeat interval must be shorter than the lease")
     task_id = str(task["id"])
     audit = AuditLog(audit_path)
     if task.get("status") != "CLAIMED":
@@ -59,7 +62,7 @@ def execute_claimed_task(
     running["status"] = "EXECUTING"
     running["attempt"] = int(task.get("attempt", 0)) + 1
     running["lease"] = {"token": token,
-                        "expires_at": (datetime.now(UTC) + timedelta(seconds=120)).isoformat()}
+                        "expires_at": (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()}
     if not store.compare_and_save(task, running):
         raise LeaseLost("Task changed before execution")
     audit.append("execution_started", task_id=task_id, owner=running.get("owner"))
@@ -75,7 +78,7 @@ def execute_claimed_task(
                     return
                 updated = dict(current)
                 updated["lease"] = {"token": token, "expires_at": (
-                    datetime.now(UTC) + timedelta(seconds=120)).isoformat()}
+                    datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()}
                 if not store.compare_and_save(current, updated):
                     lost.set()
                     return

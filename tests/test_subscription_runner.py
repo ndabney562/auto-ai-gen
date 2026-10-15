@@ -183,6 +183,8 @@ def test_isolated_validator_mounts_no_credentials_and_disables_network(tmp_path,
     observed = []
 
     def run(command, **kwargs):
+        if len(command) > 1 and command[1].endswith("_cli_guard.py"):
+            command = command[4:]
         observed.append(command)
         if command[0] == "git":
             return subprocess.CompletedProcess(command, 0, stdout=buffer.getvalue())

@@ -7,7 +7,9 @@ import fcntl
 import io
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -102,7 +104,21 @@ def candidate_commit(repo: Path, base: str, targets: list[str], output: str) -> 
 def docker_validate(repo: Path, sha: str, image: str) -> dict:
     """Validate an immutable archive with no host credentials, network, or Docker socket."""
     name = "auto-ai-gen-" + uuid4().hex
+    registry = JsonTaskStore(repo / ".git" / "agent-validation")
+    try:
+        previous = registry.load("active")
+    except FileNotFoundError:
+        previous = None
+    if previous:
+        subprocess.run(["docker", "rm", "-f", previous["name"]], check=False,
+                       capture_output=True, timeout=30)
+        old = Path(previous["snapshot_dir"])
+        if old.parent.resolve() == Path(tempfile.gettempdir()).resolve() and old.name.startswith("candidate-"):
+            shutil.rmtree(old, ignore_errors=True)
     with tempfile.TemporaryDirectory(prefix="candidate-") as directory:
+        # Persist unique resource identities before starting an external process.
+        registry.save("active", {"id": "active", "name": name, "snapshot_dir": directory,
+                                 "candidate_sha": sha})
         archive = subprocess.run(["git", "-C", str(repo), "archive", sha], check=True,
                                  capture_output=True, timeout=60).stdout
         with tarfile.open(fileobj=io.BytesIO(archive)) as source:
@@ -117,7 +133,11 @@ def docker_validate(repo: Path, sha: str, image: str) -> dict:
                    ("PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider && "
                     "ruff check --no-cache .")]
         try:
-            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=600)
+            cleanup = ["docker", "rm", "-f", name]
+            guarded = [sys.executable, str(Path(__file__).parents[1] / "providers" / "_cli_guard.py"),
+                       str(os.getpid()), json.dumps(cleanup), *command]
+            result = subprocess.run(guarded, check=False, capture_output=True, text=True,
+                                    timeout=600, start_new_session=True)
             if result.returncode in {125, 126, 127}:
                 raise subprocess.CalledProcessError(result.returncode, command)
             return {"candidate_sha": sha, "passed": result.returncode == 0,

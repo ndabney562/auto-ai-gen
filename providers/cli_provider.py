@@ -4,8 +4,10 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from providers.base import WorkerResult
 from providers.errors import ClassifiedProviderError, ProviderExecutionError, ProviderFailure
@@ -51,7 +53,9 @@ class CliWorker:
 
     def _run(self, command: list[str], prompt: str, cwd: str) -> tuple[int, str, str]:
         process = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            [sys.executable, str(Path(__file__).with_name("_cli_guard.py")),
+             str(os.getpid()), "[]", *command],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, cwd=cwd, env=subscription_environment(), start_new_session=True,
         )
         try:
