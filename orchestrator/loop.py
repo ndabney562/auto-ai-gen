@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from orchestrator.executor import execute_claimed_task
+from orchestrator.provider_state import load_provider_health
 from orchestrator.recovery import recover_after_restart
 from orchestrator.runtime import WorkerFactory
 from orchestrator.scheduler import choose_ready_task, dispatch_task
@@ -22,27 +23,40 @@ def run_scheduler_loop(
     *,
     factories: dict[str, WorkerFactory] | None = None,
     audit_path: str | Path = "audit/events.jsonl",
+    provider_health_path: str | Path | None = None,
     poll_seconds: float = 5.0,
     max_ticks: int | None = None,
 ) -> None:
     ticks = 0
     while max_ticks is None or ticks < max_ticks:
+        live_providers = provider_source()
+        saved = (
+            {health.name: health for health in load_provider_health(provider_health_path)}
+            if provider_health_path is not None
+            else {}
+        )
+        providers = [saved.get(health.name, health) for health in live_providers]
+        can_dispatch = any(health.available() for health in providers)
+
         for existing in store.list_tasks():
             recovered = recover_after_restart(existing)
+            if recovered.get("status") == "WAIT_PROVIDER" and can_dispatch:
+                recovered["status"] = "READY"
+                recovered["next_action"] = {"type": "dispatch"}
             if recovered != existing:
                 store.save(recovered["id"], recovered)
 
         tasks = store.list_tasks()
         task = choose_ready_task(tasks)
         if task is not None:
-            updated = dispatch_task(task, provider_source())
+            updated = dispatch_task(task, providers)
             store.save(updated["id"], updated)
             if updated["status"] == "CLAIMED" and factories is not None:
                 try:
                     execute_claimed_task(
                         store,
                         updated,
-                        provider_source,
+                        lambda: providers,
                         factories,
                         audit_path=audit_path,
                     )
