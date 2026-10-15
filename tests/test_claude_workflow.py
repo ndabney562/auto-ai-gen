@@ -2,7 +2,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[1]
 CLAUDE_WORKFLOW = ROOT / ".github/workflows/claude-engineering.yml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
