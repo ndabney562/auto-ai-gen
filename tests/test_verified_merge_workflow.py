@@ -14,7 +14,11 @@ def test_verified_merge_has_strict_triggers_and_permissions() -> None:
     trigger = config.get("on", config.get(True))
     assert trigger["workflow_run"]["workflows"] == ["CI"]
     assert trigger["workflow_run"]["types"] == ["completed"]
-    assert config["permissions"] == {"contents": "write", "pull-requests": "write"}
+    assert config["permissions"] == {
+        "actions": "read",
+        "contents": "write",
+        "pull-requests": "write",
+    }
     assert config["jobs"]["merge-verified"]["steps"][0]["uses"] == "actions/github-script@v8"
 
 
