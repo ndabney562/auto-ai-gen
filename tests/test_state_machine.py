@@ -1,3 +1,5 @@
+from itertools import pairwise
+
 import pytest
 
 from orchestrator.state_machine import TaskState, can_transition, transition
@@ -15,7 +17,7 @@ def test_happy_path_transitions() -> None:
         TaskState.DONE,
     ]
 
-    for current, target in zip(path, path[1:]):
+    for current, target in pairwise(path):
         assert can_transition(current, target)
         assert transition(current, target) == target
 
