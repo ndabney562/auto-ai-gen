@@ -21,7 +21,7 @@ class Lease:
         *,
         ttl_seconds: int = 900,
         now: datetime | None = None,
-    ) -> "Lease":
+    ) -> Lease:
         now = now or datetime.now(UTC)
         return cls(task_id, worker_id, provider, now, now + timedelta(seconds=ttl_seconds))
 
