@@ -109,7 +109,7 @@ def test_subscription_commands_disable_tools_and_configuration():
     assert claude.command[claude.command.index("--tools") + 1] == ""
 
 
-def test_actual_cli_process_protocol_without_paid_calls(tmp_path):
+def test_actual_cli_process_protocol_without_paid_calls(tmp_path, monkeypatch):
     script = tmp_path / "codex"
     script.write_text('''#!/usr/bin/env python3
 import sys,json
@@ -123,6 +123,14 @@ else:
         print(json.dumps(event))
 ''')
     script.chmod(0o755)
+    # The validator's /tmp is deliberately noexec. Invoke this Python fixture
+    # through the installed interpreter while retaining real subprocess I/O.
+    original_run = CliWorker._run
+
+    def run_fixture(self, command, prompt, cwd):
+        return original_run(self, [sys.executable, *command], prompt, cwd)
+
+    monkeypatch.setattr(CliWorker, "_run", run_fixture)
     worker = codex_subscription_worker()
     worker = replace(worker, command=(str(script), *worker.command[1:]))
     assert worker.execute({"prompt": "implement"}).session_id == "fixture"
