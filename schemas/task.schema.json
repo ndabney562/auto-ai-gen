@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auto-ai-gen.local/schemas/task.schema.json",
+  "title": "Autonomous Agent Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "objective", "status", "attempt", "dependencies", "next_action"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "objective": {"type": "string", "minLength": 1},
+    "status": {
+      "type": "string",
+      "enum": ["NEW", "PLANNING", "READY", "CLAIMED", "EXECUTING", "VALIDATING", "REVIEW", "REPAIR", "WAIT_PROVIDER", "WAIT_RETRY", "WAIT_DEPENDENCY", "WAIT_CI", "WAIT_HUMAN", "BLOCKED", "DONE", "CANCELLED", "FAILED_PERMANENT"]
+    },
+    "priority": {"type": "integer", "default": 0},
+    "dependencies": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "attempt": {"type": "integer", "minimum": 0},
+    "owner": {
+      "type": ["object", "null"],
+      "properties": {
+        "provider": {"type": "string"},
+        "model": {"type": "string"},
+        "lease_expires": {"type": ["string", "null"], "format": "date-time"}
+      },
+      "additionalProperties": false
+    },
+    "branch": {"type": ["string", "null"]},
+    "checkpoint": {"type": ["object", "null"]},
+    "validation": {"type": ["object", "null"]},
+    "last_error": {"type": ["object", "null"]},
+    "next_action": {"type": "object"},
+    "updated_at": {"type": ["string", "null"], "format": "date-time"}
+  }
+}
