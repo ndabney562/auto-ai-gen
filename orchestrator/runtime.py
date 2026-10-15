@@ -9,6 +9,7 @@ from pathlib import Path
 from orchestrator.dispatcher import NoProviderAvailable, select_provider
 from providers.anthropic_provider import AnthropicWorker
 from providers.base import ProviderWorker, WorkerResult
+from providers.errors import normalize_sdk_error
 from providers.health import ProviderHealth
 from providers.openai_provider import OpenAIWorker
 
@@ -38,7 +39,10 @@ def execute_with_failover(
         selected = select_provider(remaining, preferred=preferred)
         try:
             return selected.name, factories[selected.name]().execute(handoff)
-        except Exception as exc:  # noqa: BLE001 - provider SDK exceptions are normalized at boundary
+        except Exception as exc:
+            classified = normalize_sdk_error(exc)
+            if not classified.retryable:
+                raise
             last_error = exc
             remaining = [provider for provider in remaining if provider.name != selected.name]
             preferred = None
