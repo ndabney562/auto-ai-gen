@@ -14,7 +14,8 @@ permissions:
 jobs:
   merge-verified:
     if: >-
-      ${{ github.event.workflow_run.event == 'pull_request' &&
+      ${{ (github.event.workflow_run.event == 'pull_request' ||
+           github.event.workflow_run.event == 'workflow_dispatch') &&
           github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
@@ -26,14 +27,18 @@ jobs:
             const { owner, repo } = context.repo;
             const fullName = `${owner}/${repo}`;
 
-            // Only owner-triggered, same-repository CI runs are trusted.
-            if (run.actor?.login !== owner ||
-                run.head_repository?.full_name !== fullName ||
-                !/^stage[0-9]+\//.test(run.head_branch || '')) {
-              core.info('Not a trusted agent-stage PR run; no merge.');
+            // Only owner PR CI and our constrained bot-created Claude PR CI can merge.
+            const ownerStage = run.event === 'pull_request' &&
+              run.actor?.login === owner &&
+              /^stage[0-9]+\//.test(run.head_branch || '');
+            const botClaudeStage = run.event === 'workflow_dispatch' &&
+              run.actor?.login === 'github-actions[bot]' &&
+              /^stage11\/claude-[0-9]+$/.test(run.head_branch || '');
+            if (run.head_repository?.full_name !== fullName ||
+                !(ownerStage || botClaudeStage)) {
+              core.info('Not a trusted agent-stage CI run; no merge.');
               return;
             }
-
             // GitHub sometimes reports an empty workflow_run.pull_requests list.
             // Match against open PRs by immutable tested head SHA instead.
             const pulls = await github.paginate(github.rest.pulls.list, {
@@ -44,7 +49,9 @@ jobs:
               pr.head.repo?.full_name === fullName &&
               pr.head.ref === run.head_branch &&
               pr.head.sha === run.head_sha &&
-              pr.user?.login === owner &&
+              (botClaudeStage
+                ? pr.user?.login === 'github-actions[bot]'
+                : pr.user?.login === owner) &&
               !pr.draft
             );
             if (matching.length !== 1) {

@@ -1,0 +1,74 @@
+name: Claude Implements, OpenAI Reviews
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "One focused engineering task for Claude"
+        required: true
+        type: string
+      target_file:
+        description: "Allowlisted file path, e.g. docs/claude-proof.md"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  implement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install control plane and test tools
+        run: pip install -e '.[dev]'
+      - name: Create isolated stage branch
+        env:
+          BRANCH: stage11/claude-${{ github.run_id }}
+        run: git checkout -b "$BRANCH"
+      - name: Claude implements and OpenAI independently reviews
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          ENGINEERING_TASK: ${{ inputs.task }}
+          TARGET_FILE: ${{ inputs.target_file }}
+        run: python -m orchestrator.engineering --task "$ENGINEERING_TASK" --target "$TARGET_FILE"
+      - name: Validate entire repository
+        run: |
+          ruff check .
+          pytest -q
+      - name: Commit reviewed proposal and open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: stage11/claude-${{ github.run_id }}
+          TARGET_FILE: ${{ inputs.target_file }}
+          ENGINEERING_TASK: ${{ inputs.task }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "$TARGET_FILE"
+          if git diff --cached --quiet; then
+            echo 'Claude did not propose a change; refusing empty PR.'
+            exit 1
+          fi
+          git commit -m "agent: Claude implementation reviewed by OpenAI"
+          git push --set-upstream origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "Claude implementation: $TARGET_FILE" \
+            --body "Claude generated this single-file change. OpenAI independently approved it. Repository lint and tests passed before PR creation. Task: $ENGINEERING_TASK"
+      - name: Trigger GitHub CI on bot-created PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: stage11/claude-${{ github.run_id }}
+        run: gh workflow run ci.yml --ref "$BRANCH"
