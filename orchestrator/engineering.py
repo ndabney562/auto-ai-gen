@@ -31,6 +31,7 @@ def safe_target(root: Path, name: str) -> Path:
         or ".." in path.parts
         or "." in path.parts
         or len(path.parts) < 2
+        or any(part.endswith(tuple(ALLOWED_EXTENSIONS)) for part in path.parts[:-1])
         or path.parts[0] not in ALLOWED_ROOTS
         or path.suffix not in ALLOWED_EXTENSIONS
     ):
