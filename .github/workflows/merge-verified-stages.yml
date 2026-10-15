@@ -1,0 +1,85 @@
+name: Merge Verified Agent Stages
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+# This privileged workflow never checks out or executes PR code.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge-verified:
+    if: >-
+      ${{ github.event.workflow_run.event == 'pull_request' &&
+          github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify provenance, CI steps, and merge
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const { owner, repo } = context.repo;
+            const fullName = `${owner}/${repo}`;
+
+            // Only owner-triggered, same-repository CI runs are trusted.
+            if (run.actor?.login !== owner ||
+                run.head_repository?.full_name !== fullName ||
+                !/^stage[0-9]+\//.test(run.head_branch || '')) {
+              core.info('Not a trusted agent-stage PR run; no merge.');
+              return;
+            }
+
+            // GitHub sometimes reports an empty workflow_run.pull_requests list.
+            // Match against open PRs by immutable tested head SHA instead.
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: 'open', per_page: 100
+            });
+            const matching = pulls.filter(pr =>
+              pr.base.ref === 'main' &&
+              pr.head.repo?.full_name === fullName &&
+              pr.head.ref === run.head_branch &&
+              pr.head.sha === run.head_sha &&
+              pr.user?.login === owner &&
+              !pr.draft
+            );
+            if (matching.length !== 1) {
+              core.info(`Expected one eligible PR; found ${matching.length}.`);
+              return;
+            }
+
+            const { data: jobPage } = await github.rest.actions.listJobsForWorkflowRun({
+              owner, repo, run_id: run.id, per_page: 100
+            });
+            const verify = jobPage.jobs.find(job =>
+              job.name === 'verify' && job.conclusion === 'success'
+            );
+            const passed = name => verify?.steps?.some(step =>
+              step.name === name && step.conclusion === 'success'
+            );
+            if (!passed('Lint') || !passed('Test')) {
+              core.setFailed('Required lint/test steps were not both successful.');
+              return;
+            }
+
+            const pr = matching[0];
+            const { data: latest } = await github.rest.pulls.get({
+              owner, repo, pull_number: pr.number
+            });
+            if (latest.head.sha !== run.head_sha || latest.mergeable !== true) {
+              core.info('PR changed, conflicts exist, or mergeability is pending; not merging.');
+              return;
+            }
+
+            const { data: merged } = await github.rest.pulls.merge({
+              owner, repo, pull_number: latest.number,
+              sha: run.head_sha, merge_method: 'merge'
+            });
+            if (!merged.merged) {
+              core.setFailed(`GitHub declined merge for PR #${latest.number}`);
+            } else {
+              core.info(`Verified CI and merged stage PR #${latest.number}`);
+            }
