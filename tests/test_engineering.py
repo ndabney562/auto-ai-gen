@@ -52,7 +52,7 @@ def test_rejects_unauthorized_paths(tmp_path, name) -> None:
 
 
 def test_rejects_model_json_that_is_not_object(tmp_path) -> None:
-    with pytest.raises(ValueError, match="one JSON object"):
+    with pytest.raises(TypeError, match="one JSON object"):
         engineer_one_file(
             tmp_path,
             "docs/sample.md",
