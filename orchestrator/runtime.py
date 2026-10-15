@@ -6,12 +6,12 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from orchestrator.dispatcher import NoProviderAvailable, select_provider
 from providers.anthropic_provider import AnthropicWorker
 from providers.base import ProviderWorker, WorkerResult
 from providers.health import ProviderHealth
 from providers.openai_provider import OpenAIWorker
 
+from orchestrator.dispatcher import NoProviderAvailable, select_provider
 
 WorkerFactory = Callable[[], ProviderWorker]
 
@@ -33,13 +33,13 @@ def execute_with_failover(
     preferred: str | None = None,
 ) -> tuple[str, WorkerResult]:
     remaining = list(providers)
-    last_error: Exception | None = None
+    last_error: BaseException | None = None
 
     while remaining:
         selected = select_provider(remaining, preferred=preferred)
         try:
             return selected.name, factories[selected.name]().execute(handoff)
-        except Exception as exc:  # provider SDK exceptions are normalized in the next stage
+        except (Exception, KeyboardInterrupt) as exc:
             last_error = exc
             remaining = [provider for provider in remaining if provider.name != selected.name]
             preferred = None
