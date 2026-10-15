@@ -8,6 +8,7 @@ from typing import Protocol
 class WorkerResult:
     output: str
     checkpoint_required: bool = True
+    session_id: str | None = None
 
 
 class ProviderWorker(Protocol):

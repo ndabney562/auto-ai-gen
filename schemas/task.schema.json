@@ -136,6 +136,15 @@
     "max_attempts": {
       "type": "integer",
       "minimum": 1
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "type": "string"
+      }
     }
   }
 }
