@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass
-from typing import Sequence
 
 from providers.base import WorkerResult
 
@@ -12,12 +11,12 @@ from providers.base import WorkerResult
 class CliWorker:
     """Provider worker backed by an authenticated local coding CLI.
 
-    This deliberately passes no API key. Authentication and subscription usage
-    remain the responsibility of the installed Codex/Claude CLI.
+    Authentication and subscription usage remain the responsibility of the
+    installed Codex or Claude CLI; this worker deliberately passes no API key.
     """
 
     name: str
-    command: Sequence[str]
+    command: tuple[str, ...]
     timeout_seconds: int = 1800
 
     def execute(self, handoff: dict[str, object]) -> WorkerResult:
