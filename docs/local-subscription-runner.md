@@ -1,8 +1,9 @@
 # Local subscription runner prototype
 
-Status: draft prototype. Unit and process-fixture tests exercise the orchestration;
-the live two-provider/Docker/GitHub acceptance run has not passed. Do not enable
-unattended merging until that run succeeds.
+Status: supervised prototype. Live subscription handoffs, isolated validation,
+independent exact-commit reviews, PR reconciliation, and one explicitly approved
+supervised merge have passed. The full unattended acceptance matrix remains
+incomplete; automatic merging stays guarded. See [live results](live-subscription-pilot.md).
 
 The default runtime now selects installed `codex` and `claude` commands. It never
 selects the API workers from environment keys. CLI children receive a minimal
@@ -23,9 +24,9 @@ are required. Credentials stay in the tools' existing local login stores.
 ## Prerequisites and supervised acceptance
 
 Use Python 3.11+, subscription-authenticated Codex and Claude CLIs, a local Docker
-runtime, and authenticated GitHub CLI (`gh`). The current execution host has no
-Claude or Docker executable available. Desktop-app login alone does not establish
-CLI availability or subscription authentication.
+runtime, and authenticated GitHub CLI (`gh`). The supervised host now has these tools and both subscription logins have been
+verified. Desktop-app login alone does not establish CLI availability or
+subscription authentication.
 
 Install the project and tests in an isolated environment. Build the validator image
 from this trusted checkout, before introducing generated changes:
