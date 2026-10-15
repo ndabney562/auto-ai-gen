@@ -1,6 +1,6 @@
+from orchestrator.runtime import execute_with_failover
 from providers.base import WorkerResult
 from providers.health import ProviderHealth
-from orchestrator.runtime import execute_with_failover
 
 
 class FailingWorker:
