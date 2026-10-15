@@ -46,7 +46,7 @@ def safe_target(root: Path, name: str) -> Path:
 def parse_object(text: str) -> dict[str, Any]:
     payload = json.loads(text)
     if not isinstance(payload, dict):
-        raise ValueError("Model response must be one JSON object")
+        raise TypeError("Model response must be one JSON object")
     return payload
 
 
