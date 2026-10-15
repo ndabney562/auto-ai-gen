@@ -45,3 +45,23 @@ def save_provider_health(path: str | Path, providers: list[ProviderHealth]) -> N
     temporary = target.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     temporary.replace(target)
+
+
+def load_provider_health(path: str | Path) -> list[ProviderHealth]:
+    """Restore provider cooldowns rather than forgetting them on process restart."""
+    target = Path(path)
+    if not target.exists():
+        return []
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    providers = []
+    for name, item in sorted(payload.items()):
+        retry_at = item.get("retry_at")
+        providers.append(
+            ProviderHealth(
+                name=name,
+                state=ProviderState(item["state"]),
+                retry_at=datetime.fromisoformat(retry_at) if retry_at else None,
+                last_error=item.get("last_error"),
+            )
+        )
+    return providers
