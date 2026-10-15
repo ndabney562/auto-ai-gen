@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import sys
 from pathlib import Path
 
@@ -29,6 +31,17 @@ successful repair. Modify exactly this file. No other source changes.
 
 
 class DraftPublisher(GitHubPublisher):
+    def __init__(self, repository, interrupt_after_publish=False):
+        super().__init__(repository)
+        self.interrupt_after_publish = interrupt_after_publish
+
+    def publish(self, workspace, task_id, sha):
+        pr = super().publish(workspace, task_id, sha)
+        if self.interrupt_after_publish:
+            print(json.dumps({"created_before_interruption": pr}), flush=True)
+            os.kill(os.getpid(), signal.SIGKILL)
+        return pr
+
     def _gh(self, *args):
         if args[:2] == ("pr", "create"):
             options = list(args)
@@ -47,6 +60,7 @@ def main():
     parser.add_argument("--repo", type=Path, required=True)
     parser.add_argument("--repository", default="ndabney562/auto-ai-gen")
     parser.add_argument("--image", default="auto-ai-gen-validator:pilot-v2")
+    parser.add_argument("--interrupt-after-publish", action="store_true")
     args = parser.parse_args()
     args.state.mkdir(parents=True, exist_ok=True)
     identity = args.state / "task-id.txt"
@@ -57,7 +71,7 @@ def main():
     task = JsonTaskStore(args.state / "tasks").load(task_id)
     if task["status"] == "WAIT_CI":
         task = publish_task(args.state, task_id, args.repository,
-                            publisher=DraftPublisher(args.repository))
+                            publisher=DraftPublisher(args.repository, args.interrupt_after_publish))
     else:
         task = advance_task(args.state, task_id, image=args.image)
     print(json.dumps({"task_id": task_id, "status": task["status"],
