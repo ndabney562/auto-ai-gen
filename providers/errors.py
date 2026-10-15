@@ -67,6 +67,9 @@ def _retry_after_seconds(exc: Exception) -> float | None:
 
 def normalize_sdk_error(exc: Exception) -> ClassifiedProviderError:
     """Normalize OpenAI/Anthropic-style SDK exceptions without coupling to SDK internals."""
+    classified = getattr(exc, "classified", None)
+    if isinstance(classified, ClassifiedProviderError):
+        return classified
     status_code = getattr(exc, "status_code", None)
     detail = str(exc)
     lowered = detail.lower()
@@ -87,3 +90,9 @@ def normalize_sdk_error(exc: Exception) -> ClassifiedProviderError:
         quota_exhausted=quota_exhausted,
         detail=detail,
     )
+
+
+class ProviderExecutionError(RuntimeError):
+    def __init__(self, message: str, classified: ClassifiedProviderError):
+        super().__init__(message)
+        self.classified = classified

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 from orchestrator.executor import execute_claimed_task
@@ -43,14 +44,18 @@ def run_scheduler_loop(
             if recovered.get("status") == "WAIT_PROVIDER" and can_dispatch:
                 recovered["status"] = "READY"
                 recovered["next_action"] = {"type": "dispatch"}
+            if (recovered.get("status") == "WAIT_RETRY" and recovered.get("retry_at")
+                    and datetime.fromisoformat(recovered["retry_at"]) <= datetime.now(UTC)):
+                recovered["status"] = "READY"
             if recovered != existing:
-                store.save(recovered["id"], recovered)
+                store.compare_and_save(existing, recovered)
 
         tasks = store.list_tasks()
         task = choose_ready_task(tasks)
         if task is not None:
             updated = dispatch_task(task, providers)
-            store.save(updated["id"], updated)
+            if not store.compare_and_save(task, updated):
+                continue
             if updated["status"] == "CLAIMED" and factories is not None:
                 try:
                     execute_claimed_task(

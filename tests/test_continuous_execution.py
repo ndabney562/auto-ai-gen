@@ -27,7 +27,7 @@ def test_loop_dispatches_and_executes_ready_task(tmp_path) -> None:
     )
 
     task = store.load("TP-40")
-    assert task["status"] == "DONE"
+    assert task["status"] == "VALIDATING"
     assert task["result"] == "completed TP-40"
 
 
@@ -55,5 +55,5 @@ def test_loop_recovers_expired_execution_then_completes(tmp_path) -> None:
     )
 
     task = store.load("TP-41")
-    assert task["status"] == "DONE"
+    assert task["status"] == "VALIDATING"
     assert task["result"] == "completed TP-41"

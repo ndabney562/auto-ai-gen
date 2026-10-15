@@ -35,11 +35,11 @@ def test_executor_persists_completion_and_audit(tmp_path) -> None:
         audit_path=tmp_path / "audit.jsonl",
     )
 
-    assert completed["status"] == "DONE"
+    assert completed["status"] == "VALIDATING"
     assert completed["result"] == "finished TP-30"
-    assert store.load("TP-30")["checkpoint"]["phase"] == "DONE"
+    assert store.load("TP-30")["checkpoint"]["phase"] == "VALIDATING"
     events = [json.loads(line)["event"] for line in (tmp_path / "audit.jsonl").read_text().splitlines()]
-    assert events == ["execution_started", "execution_completed"]
+    assert events == ["execution_started", "execution_awaiting_validation"]
 
 
 def test_executor_requeues_interrupted_task(tmp_path) -> None:
@@ -57,5 +57,5 @@ def test_executor_requeues_interrupted_task(tmp_path) -> None:
         )
 
     saved = store.load("TP-31")
-    assert saved["status"] == "READY"
+    assert saved["status"] == "WAIT_RETRY"
     assert saved["next_action"] == {"type": "retry"}
