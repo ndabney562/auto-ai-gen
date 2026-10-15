@@ -1,8 +1,8 @@
 # Local subscription runner prototype
 
 Status: supervised prototype. Live subscription handoffs, isolated validation,
-independent exact-commit reviews, PR reconciliation, and one explicitly approved
-supervised merge have passed. The full unattended acceptance matrix remains
+independent exact-commit reviews, real CI-failure repair, active interruption
+recovery, PR reconciliation, and one explicitly approved supervised merge have passed. The full unattended acceptance matrix remains
 incomplete; automatic merging stays guarded. See [live results](live-subscription-pilot.md).
 
 The default runtime now selects installed `codex` and `claude` commands. It never
@@ -91,13 +91,15 @@ enforced for administrators. Missing protection blocks automatic merge. The GitH
 merge request includes the expected head SHA. DONE is recorded only after confirmed
 merge; waiting for CI or returning model text cannot complete a task.
 
-## Remaining acceptance work
+## Acceptance evidence and remaining work
 
-Run the pilot with both real subscription CLIs and Docker. Interrupt after each
-checkpoint, simulate a usage-limit failover, make the independent reviewer
-unavailable, introduce and repair a CI failure, and verify PR/merge reconciliation.
-Inspect CLI versions, account authentication, container isolation, and repository
-branch protection before allowing unattended execution. Dependency locking,
+The live [subscription pilot](live-subscription-pilot.md) and
+[CI repair/interruption trials](ci-repair-and-interruption.md) cover both real
+subscription CLIs, simulated quota failover, independent-reviewer unavailability,
+a real GitHub CI failure/model repair, coordinator process death, active Docker
+interruption, and publication checkpoint recovery. These are supervised trials.
+Inspect repository branch protection and enforce immutable dependency/image
+provenance before allowing unattended execution. Dependency locking,
 additional repository context gathering, and richer cancellation of in-flight
 external phases remain future work.
 

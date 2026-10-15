@@ -53,10 +53,10 @@ no merge occurred until the user answered the explicit risk-specific approval
 question. This was permission for one documentation-only merge, not permission to
 enable unattended merging or change repository settings.
 
-The runner uses explicit commands for publication and CI advancement. A real
-GitHub CI failure followed by a model repair, interruption during an active external
-phase, server-enforced protected merging, and a background service remain unverified.
-The live restart test covered saved phase boundaries, not loss of power during a
-provider subprocess. Draft PR #17 should remain draft pending the remaining
-acceptance work. Dependency versions and validation-image provenance also need
-stronger locking before unattended use.
+The runner uses explicit commands for publication and CI advancement. The later
+[CI repair and interruption acceptance](ci-repair-and-interruption.md) verified a
+real GitHub failure/model repair, process-death containment, lease-expiry recovery,
+active Docker interruption, and a kill between PR creation and checkpoint saving.
+Server-enforced protected merging, dependency/image locking, and a background
+service remain follow-up work before unattended use. Repository protection settings
+were not changed, and draft PR #17 was not merged.
