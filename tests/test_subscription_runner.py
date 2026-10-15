@@ -245,6 +245,17 @@ def test_repair_receives_failed_candidate_instead_of_original_source(setup_task)
     result = advance_task(state, task_id, factories={"openai": RepairWorker},
                           health=[ProviderHealth("openai")])
     assert result["status"] == "VALIDATING"
+    advance_task(state, task_id, validator=validated)
+
+    class RepairReviewer:
+        def execute(self, handoff):
+            request = json.loads(handoff["prompt"].split("\n", 1)[1])
+            assert request["previous_failures"] == ["CI fixture failure"]
+            return Reviewer().execute(handoff)
+
+    reviewed = advance_task(state, task_id, factories={"anthropic": RepairReviewer},
+                            health=[ProviderHealth("anthropic")])
+    assert reviewed["status"] == "WAIT_CI"
 
 
 def test_review_attempt_is_durable_before_request_and_stops_at_budget(setup_task):
