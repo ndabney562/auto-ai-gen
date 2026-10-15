@@ -1,5 +1,7 @@
 # Build only from a trusted coordinator checkout, before any generated changes.
 FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git nodejs \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/bootstrap
 COPY pyproject.toml ./
 COPY orchestrator ./orchestrator

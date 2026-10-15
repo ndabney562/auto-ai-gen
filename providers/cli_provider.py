@@ -33,7 +33,7 @@ def _failure(detail: str) -> CliError:
 
 def subscription_environment() -> dict[str, str]:
     """Keep account-login locations, exclude API/cloud credentials and paid overrides."""
-    allowed = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CODEX_HOME", "CLAUDE_CONFIG_DIR"}
+    allowed = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "USER"}
     return {key: value for key, value in os.environ.items() if key in allowed}
 
 

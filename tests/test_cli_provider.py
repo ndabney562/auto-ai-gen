@@ -126,3 +126,11 @@ else:
     worker = codex_subscription_worker()
     worker = replace(worker, command=(str(script), *worker.command[1:]))
     assert worker.execute({"prompt": "implement"}).session_id == "fixture"
+
+
+def test_subscription_environment_keeps_user_for_macos_claude_keychain(monkeypatch):
+    monkeypatch.setenv("USER", "pilot-user")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "never-forward")
+    environment = subscription_environment()
+    assert environment["USER"] == "pilot-user"
+    assert "ANTHROPIC_API_KEY" not in environment

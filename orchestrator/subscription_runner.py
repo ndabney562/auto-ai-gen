@@ -229,6 +229,8 @@ def _advance(state, task_id, image, factories, health, validator):
         try:
             result = factories[reviewer]().execute({"prompt": prompt})
             verdict = json.loads(result.output)
+            if not isinstance(verdict, dict):
+                raise TypeError("Review must be a JSON object")
         except Exception as exc:  # noqa: BLE001 - persist only classified metadata
             classified = normalize_sdk_error(exc)
             record_provider_error(state / "provider-health.json", reviewer, classified)
@@ -252,6 +254,9 @@ def _advance(state, task_id, image, factories, health, validator):
 
 def _repair(store, task, checkpoint, reason):
     checkpoint.pop("candidate_sha", None)
+    checkpoint.pop("resume_phase", None)
+    checkpoint.pop("review_attempt", None)
+    checkpoint.pop("review", None)
     checkpoint["known_failures"] = [*checkpoint.get("known_failures", []), str(reason)[-16000:]]
     return _save(store, task, dict(task, status="REPAIR", checkpoint=checkpoint,
                                   next_action={"type": "repair_candidate"}))

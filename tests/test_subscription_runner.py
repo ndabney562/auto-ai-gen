@@ -201,3 +201,19 @@ def test_isolated_validator_mounts_no_credentials_and_disables_network(tmp_path,
     assert not any(".codex" in arg or "docker.sock" in arg for arg in command)
     assert observed[-1][:3] == ["docker", "rm", "-f"]
     assert result["passed"]
+
+
+def test_repair_clears_previous_reviewer_resume_phase(setup_task):
+    from orchestrator.subscription_runner import _repair
+
+    _, state, task_id = setup_task
+    store = JsonTaskStore(state / "tasks")
+    task = store.load(task_id)
+    task["status"] = "REVIEW"
+    task["checkpoint"].update(candidate_sha="old", resume_phase="REVIEW", review_attempt=2,
+                              review={"approved": True, "candidate_sha": "old"})
+    store.save(task_id, task)
+    repaired = _repair(store, task, dict(task["checkpoint"]), "Needs another implementation")
+    assert repaired["status"] == "REPAIR"
+    for key in ("candidate_sha", "resume_phase", "review_attempt", "review"):
+        assert key not in repaired["checkpoint"]
