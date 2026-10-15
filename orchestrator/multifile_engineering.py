@@ -1,4 +1,4 @@
-"""Atomic multi-file Claude implementation with independent OpenAI review."""
+"""Recoverable multi-file implementation with independent review."""
 
 from __future__ import annotations
 
@@ -25,7 +25,10 @@ def engineer_files(
     claude: ModelCall,
     openai: ModelCall,
 ) -> dict[str, Any]:
-    """Review a bounded patchset as a unit, then write all files atomically."""
+    """Review a bounded patchset, then apply with rollback and crash recovery."""
+    from orchestrator.patch_transaction import apply_patchset, recover_patch
+
+    recover_patch(root)
     if not task.strip() or len(task) > 8000:
         raise ValueError("Task description must contain 1 to 8000 characters")
     if not 1 <= len(target_names) <= MAX_FILES:
@@ -101,9 +104,5 @@ def engineer_files(
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError("Independent reviewer must provide a reason")
 
-    # No filesystem mutation occurs before the whole patchset is approved and validated.
-    for name in target_names:
-        target = targets[name]
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(replacements[name], encoding="utf-8")
+    apply_patchset(root, originals, replacements)
     return {"paths": target_names, "summary": summary, "review": reason}

@@ -40,6 +40,15 @@ def safe_target(root: Path, name: str) -> Path:
     target = root.joinpath(*path.parts)
     if not target.resolve().is_relative_to(root):
         raise ValueError("Target resolves outside the workspace")
+    # Reject aliases even when they resolve inside the repository. An allowed
+    # docs/*.py name must never grant access to a workflow or another target.
+    cursor = root
+    for part in path.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            raise ValueError("Target contains a symlink")
+    if target.exists() and (not target.is_file() or target.stat().st_nlink != 1):
+        raise ValueError("Target must be an ordinary file without hardlink aliases")
     return target
 
 
@@ -60,6 +69,9 @@ def engineer_one_file(
     """Accept a change only when an independent reviewer explicitly approves."""
     if not task.strip() or len(task) > 8000:
         raise ValueError("Task description must contain 1 to 8000 characters")
+    from orchestrator.patch_transaction import apply_patchset, recover_patch
+
+    recover_patch(root)
     target = safe_target(root, target_name)
     original = target.read_text(encoding="utf-8") if target.exists() else ""
     if len(original.encode("utf-8")) > MAX_SOURCE_BYTES:
@@ -110,8 +122,7 @@ def engineer_one_file(
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError("Independent reviewer must provide a reason")
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(replacement, encoding="utf-8")
+    apply_patchset(root, {target_name: original}, {target_name: replacement})
     return {"path": target_name, "summary": summary, "review": reason}
 
 
