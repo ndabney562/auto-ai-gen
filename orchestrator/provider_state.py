@@ -7,7 +7,6 @@ from pathlib import Path
 from providers.errors import ClassifiedProviderError, ProviderFailure
 from providers.health import ProviderHealth, ProviderState
 
-
 _FAILURE_TO_STATE = {
     ProviderFailure.RATE_LIMITED: ProviderState.RATE_LIMITED,
     ProviderFailure.QUOTA_EXHAUSTED: ProviderState.QUOTA_EXHAUSTED,
