@@ -3,10 +3,10 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
-from orchestrator.scheduler import choose_ready_task, dispatch_task
-from orchestrator.store import JsonTaskStore
 from providers.health import ProviderHealth
 
+from orchestrator.scheduler import choose_ready_task, dispatch_task
+from orchestrator.store import JsonTaskStore
 
 ProviderSource = Callable[[], list[ProviderHealth]]
 
