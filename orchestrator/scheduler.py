@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from orchestrator.dispatcher import NoProviderAvailable, select_provider
 from orchestrator.state_machine import TaskState
@@ -17,6 +19,7 @@ def choose_ready_task(tasks: list[dict[str, Any]]) -> dict[str, Any] | None:
         task
         for task in tasks
         if task.get("status") == TaskState.READY.value and dependencies_satisfied(task, tasks)
+        and (not task.get("retry_at") or datetime.fromisoformat(task["retry_at"]) <= datetime.now(UTC))
     ]
     if not candidates:
         return None
@@ -39,5 +42,9 @@ def dispatch_task(
 
     dispatched["status"] = TaskState.CLAIMED.value
     dispatched["owner"] = {"provider": provider.name}
+    dispatched["lease"] = {
+        "token": uuid4().hex,
+        "expires_at": (datetime.now(UTC) + timedelta(seconds=120)).isoformat(),
+    }
     dispatched["next_action"] = {"type": "execute"}
     return dispatched

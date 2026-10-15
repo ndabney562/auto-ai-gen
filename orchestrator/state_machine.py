@@ -32,9 +32,14 @@ TERMINAL_STATES = {
 ALLOWED_TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.NEW: {TaskState.PLANNING, TaskState.CANCELLED},
     TaskState.PLANNING: {TaskState.READY, TaskState.BLOCKED, TaskState.WAIT_HUMAN},
-    TaskState.READY: {TaskState.CLAIMED, TaskState.WAIT_DEPENDENCY, TaskState.CANCELLED},
-    TaskState.CLAIMED: {TaskState.EXECUTING, TaskState.WAIT_PROVIDER, TaskState.CANCELLED},
+    TaskState.READY: {TaskState.CLAIMED, TaskState.WAIT_PROVIDER, TaskState.WAIT_DEPENDENCY,
+                      TaskState.FAILED_PERMANENT, TaskState.CANCELLED},
+    TaskState.CLAIMED: {TaskState.EXECUTING, TaskState.WAIT_PROVIDER, TaskState.CANCELLED,
+                        TaskState.READY, TaskState.FAILED_PERMANENT},
     TaskState.EXECUTING: {
+        TaskState.READY,  # lease-expiry recovery only
+        TaskState.FAILED_PERMANENT,
+        TaskState.CANCELLED,
         TaskState.VALIDATING,
         TaskState.WAIT_PROVIDER,
         TaskState.WAIT_RETRY,
@@ -43,7 +48,8 @@ ALLOWED_TRANSITIONS: dict[TaskState, set[TaskState]] = {
     },
     TaskState.VALIDATING: {TaskState.REVIEW, TaskState.REPAIR, TaskState.WAIT_CI},
     TaskState.REVIEW: {TaskState.DONE, TaskState.REPAIR, TaskState.BLOCKED},
-    TaskState.REPAIR: {TaskState.VALIDATING, TaskState.WAIT_PROVIDER, TaskState.WAIT_RETRY},
+    TaskState.REPAIR: {TaskState.VALIDATING, TaskState.WAIT_PROVIDER, TaskState.WAIT_RETRY,
+                       TaskState.READY},
     TaskState.WAIT_PROVIDER: {TaskState.READY, TaskState.CLAIMED, TaskState.CANCELLED},
     TaskState.WAIT_RETRY: {TaskState.READY, TaskState.CLAIMED, TaskState.CANCELLED},
     TaskState.WAIT_DEPENDENCY: {TaskState.READY, TaskState.BLOCKED, TaskState.CANCELLED},

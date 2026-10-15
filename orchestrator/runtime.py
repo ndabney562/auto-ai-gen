@@ -9,7 +9,7 @@ from pathlib import Path
 from orchestrator.dispatcher import NoProviderAvailable, select_provider
 from providers.anthropic_provider import AnthropicWorker
 from providers.base import ProviderWorker, WorkerResult
-from providers.errors import normalize_sdk_error
+from providers.errors import ProviderExecutionError, normalize_sdk_error
 from providers.health import ProviderHealth
 from providers.openai_provider import OpenAIWorker
 
@@ -36,7 +36,10 @@ def execute_with_failover(
     last_error: Exception | None = None
 
     while remaining:
-        selected = select_provider(remaining, preferred=preferred)
+        try:
+            selected = select_provider(remaining, preferred=preferred)
+        except NoProviderAvailable:
+            break
         try:
             return selected.name, factories[selected.name]().execute(handoff)
         except Exception as exc:
@@ -48,7 +51,9 @@ def execute_with_failover(
             preferred = None
 
     if last_error is not None:
-        raise RuntimeError("All configured providers failed") from last_error
+        raise ProviderExecutionError(
+            "All configured providers failed", normalize_sdk_error(last_error)
+        ) from last_error
     raise NoProviderAvailable("No provider credentials are configured")
 
 
