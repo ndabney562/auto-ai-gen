@@ -43,7 +43,10 @@ class CliWorker:
 
 def codex_subscription_worker() -> CliWorker:
     """Use the locally authenticated Codex CLI (ChatGPT subscription)."""
-    return CliWorker(name="openai-codex-cli", command=("codex", "exec", "--full-auto"))
+    return CliWorker(
+        name="openai-codex-cli",
+        command=("codex", "exec", "--full-auto"),
+    )
 
 
 def claude_subscription_worker() -> CliWorker:
