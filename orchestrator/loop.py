@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -12,6 +13,7 @@ from orchestrator.store import JsonTaskStore
 from providers.health import ProviderHealth
 
 ProviderSource = Callable[[], list[ProviderHealth]]
+logger = logging.getLogger(__name__)
 
 
 def run_scheduler_loop(
@@ -45,8 +47,8 @@ def run_scheduler_loop(
                         audit_path=audit_path,
                     )
                 except Exception:
-                    # The executor durably records interruption and requeues the task.
-                    pass
+                    # Executor persists the error and requeues the task for recovery.
+                    logger.exception("Task %s execution interrupted", updated["id"])
         ticks += 1
         if max_ticks is None or ticks < max_ticks:
             time.sleep(poll_seconds)
