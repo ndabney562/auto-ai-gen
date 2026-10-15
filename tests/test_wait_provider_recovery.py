@@ -10,7 +10,7 @@ def test_wait_provider_task_resumes_when_provider_returns(tmp_path) -> None:
     store = JsonTaskStore(tmp_path / "tasks")
     store.save("TP-50", {"id": "TP-50", "status": "WAIT_PROVIDER", "dependencies": []})
 
-    run_scheduler_loop(store, lambda: [], poll_seconds=0, max_ticks=1)
+    run_scheduler_loop(store, list, poll_seconds=0, max_ticks=1)
     assert store.load("TP-50")["status"] == "WAIT_PROVIDER"
 
     run_scheduler_loop(
