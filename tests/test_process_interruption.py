@@ -17,7 +17,8 @@ def wait_for(predicate, timeout=5):
     pytest.fail("Timed out waiting for child process state")
 
 
-def test_sigkill_coordinator_stops_cli_and_its_descendant(tmp_path):
+@pytest.mark.parametrize("signum", [signal.SIGKILL, signal.SIGTERM])
+def test_killed_coordinator_stops_cli_and_its_descendant(tmp_path, signum):
     heartbeat = tmp_path / "heartbeat"
     child = tmp_path / "child.py"
     child.write_text(
@@ -38,7 +39,7 @@ def test_sigkill_coordinator_stops_cli_and_its_descendant(tmp_path):
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         wait_for(heartbeat.exists)
-        os.kill(coordinator.pid, signal.SIGKILL)
+        os.kill(coordinator.pid, signum)
         coordinator.wait(timeout=5)
         # The guardian observes reparenting and kills its private process group.
         time.sleep(.25)

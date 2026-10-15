@@ -219,3 +219,54 @@ def test_repair_clears_previous_reviewer_resume_phase(setup_task):
     assert repaired["status"] == "REPAIR"
     for key in ("candidate_sha", "resume_phase", "review_attempt", "review"):
         assert key not in repaired["checkpoint"]
+
+
+def test_repair_receives_failed_candidate_instead_of_original_source(setup_task):
+    from orchestrator.subscription_runner import _repair
+
+    _, state, task_id = setup_task
+    kwargs = {"factories": {"openai": Implementer}, "health": [ProviderHealth("openai")],
+              "validator": validated}
+    advance_task(state, task_id, **kwargs)
+    task = advance_task(state, task_id, **kwargs)
+    store = JsonTaskStore(state / "tasks")
+    repaired = _repair(store, task, dict(task["checkpoint"]), "CI fixture failure")
+    assert repaired["validation"] is None
+    assert repaired["checkpoint"]["repair_candidate_sha"] == task["checkpoint"]["candidate_sha"]
+    advance_task(state, task_id, **kwargs)
+
+    class RepairWorker:
+        def execute(self, handoff):
+            request = json.loads(handoff["prompt"].split("\n", 1)[1])
+            assert request["sources"]["docs/a.md"] == "after"
+            assert request["failures"] == ["CI fixture failure"]
+            return Implementer().execute(handoff)
+
+    result = advance_task(state, task_id, factories={"openai": RepairWorker},
+                          health=[ProviderHealth("openai")])
+    assert result["status"] == "VALIDATING"
+
+
+def test_review_attempt_is_durable_before_request_and_stops_at_budget(setup_task):
+    _, state, task_id = setup_task
+    kwargs = {"factories": {"openai": Implementer}, "health": [ProviderHealth("openai")],
+              "validator": validated}
+    advance_task(state, task_id, **kwargs)
+    advance_task(state, task_id, **kwargs)
+    store = JsonTaskStore(state / "tasks")
+
+    class InterruptedReview:
+        def execute(self, handoff):
+            assert store.load(task_id)["checkpoint"]["review_attempt"] > 0
+            raise KeyboardInterrupt
+
+    for attempt in range(1, 4):
+        with pytest.raises(KeyboardInterrupt):
+            advance_task(state, task_id, factories={"anthropic": InterruptedReview},
+                          health=[ProviderHealth("anthropic")])
+        assert store.load(task_id)["status"] == "REVIEW"
+        assert store.load(task_id)["checkpoint"]["review_attempt"] == attempt
+    result = advance_task(state, task_id, factories={"anthropic": InterruptedReview},
+                          health=[ProviderHealth("anthropic")])
+    assert result["status"] == "WAIT_HUMAN"
+    assert result["next_action"]["type"] == "review_attempts_exhausted"
