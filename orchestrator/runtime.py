@@ -39,7 +39,7 @@ def execute_with_failover(
         selected = select_provider(remaining, preferred=preferred)
         try:
             return selected.name, factories[selected.name]().execute(handoff)
-        except Exception as exc:  # noqa: BLE001 - SDK boundary intentionally normalizes exceptions
+        except Exception as exc:
             classified = normalize_sdk_error(exc)
             if not classified.retryable:
                 raise
