@@ -5,7 +5,6 @@ from typing import Any
 
 from orchestrator.state_machine import TaskState
 
-
 RECOVERABLE_ACTIVE_STATES = {TaskState.CLAIMED, TaskState.EXECUTING, TaskState.REPAIR}
 
 
