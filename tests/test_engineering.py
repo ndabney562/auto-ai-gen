@@ -81,3 +81,36 @@ def test_symlink_outside_workspace_is_rejected(tmp_path) -> None:
     with pytest.raises(ValueError, match="outside"):
         safe_target(tmp_path, "tests/outside-stage11.py")
     assert not external.exists()
+
+
+def test_internal_symlink_cannot_write_workflow(tmp_path):
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("trusted")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/alias.py").symlink_to(workflow)
+    with pytest.raises(ValueError, match="symlink"):
+        safe_target(tmp_path, "docs/alias.py")
+    assert workflow.read_text() == "trusted"
+
+
+def test_rejects_directory_alias(tmp_path):
+    (tmp_path / "providers").mkdir()
+    (tmp_path / "docs").symlink_to(tmp_path / "providers", target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        safe_target(tmp_path, "docs/new.py")
+
+
+def test_review_cannot_overwrite_concurrent_edit(tmp_path):
+    (tmp_path / "docs").mkdir()
+    target = tmp_path / "docs/a.md"
+    target.write_text("original")
+
+    def review(prompt):
+        target.write_text("concurrent work")
+        return '{"approved":true,"reason":"ok"}'
+
+    with pytest.raises(ValueError, match="changed during review"):
+        engineer_one_file(tmp_path, "docs/a.md", "Change A",
+                          lambda p: '{"content":"proposal","summary":"edit"}', review)
+    assert target.read_text() == "concurrent work"

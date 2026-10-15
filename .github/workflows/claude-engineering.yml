@@ -13,19 +13,23 @@ on:
         type: string
 
 permissions:
-  contents: write
-  pull-requests: write
-  actions: write
+  contents: read
 
 jobs:
   implement:
+    outputs:
+      base_sha: ${{ steps.base.outputs.sha }}
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           ref: main
-          persist-credentials: true
+          persist-credentials: false
+      - id: base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -44,31 +48,80 @@ jobs:
           ENGINEERING_TASK: ${{ inputs.task }}
           TARGET_FILE: ${{ inputs.target_file }}
         run: python -m orchestrator.engineering --task "$ENGINEERING_TASK" --target "$TARGET_FILE"
+      # Only data leaves this job; generated Python is never imported here.
+      - name: Export reviewed patch
+        env:
+          TARGET_FILE: ${{ inputs.target_file }}
+        run: |
+          git add -- "$TARGET_FILE"
+          git diff --cached --binary -- "$TARGET_FILE" > /tmp/reviewed.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reviewed-patch
+          path: /tmp/reviewed.patch
+
+  validate:
+    needs: implement
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.implement.outputs.base_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install trusted dependencies
+        run: pip install -e '.[dev]'
+      - uses: actions/download-artifact@v4
+        with:
+          name: reviewed-patch
+          path: /tmp/proposal
+      - name: Apply reviewed patch
+        run: git apply --check /tmp/proposal/reviewed.patch && git apply /tmp/proposal/reviewed.patch
       - name: Validate entire repository
         run: |
           ruff check .
           pytest -q
+
+  publish:
+    needs: [implement, validate]
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.implement.outputs.base_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: reviewed-patch
+          path: /tmp/proposal
+      # The privileged job applies data but never runs generated code.
       - name: Commit reviewed proposal and open PR
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: stage11/claude-${{ github.run_id }}
+          BRANCH: agent/claude-${{ github.run_id }}-${{ github.run_attempt }}
           TARGET_FILE: ${{ inputs.target_file }}
-          ENGINEERING_TASK: ${{ inputs.task }}
         run: |
+          git checkout -b "$BRANCH"
+          git apply --check /tmp/proposal/reviewed.patch
+          git apply /tmp/proposal/reviewed.patch
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- "$TARGET_FILE"
-          if git diff --cached --quiet; then
-            echo 'Claude did not propose a change; refusing empty PR.'
-            exit 1
-          fi
-          git commit -m "agent: Claude implementation reviewed by OpenAI"
+          git diff --cached --quiet && exit 1
+          git -c core.hooksPath=/dev/null commit -m "agent: independently reviewed proposal"
+          gh auth setup-git
           git push --set-upstream origin "$BRANCH"
           gh pr create --base main --head "$BRANCH" \
-            --title "Claude implementation: $TARGET_FILE" \
-            --body "Claude generated this single-file change. OpenAI independently approved it. Repository lint and tests passed before PR creation. Task: $ENGINEERING_TASK"
-      - name: Trigger GitHub CI on bot-created PR head
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: stage11/claude-${{ github.run_id }}
-        run: gh workflow run ci.yml --ref "$BRANCH"
+            --title "Reviewed implementation: $TARGET_FILE" \
+            --body "Independent model review and isolated validation passed. Human review is required before merging."
+          gh workflow run ci.yml --ref "$BRANCH"
