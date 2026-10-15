@@ -56,7 +56,7 @@ def run_scheduler_loop(
                     execute_claimed_task(
                         store,
                         updated,
-                        lambda: providers,
+                        lambda snapshot=providers: snapshot,
                         factories,
                         audit_path=audit_path,
                     )
