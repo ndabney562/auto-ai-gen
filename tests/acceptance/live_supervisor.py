@@ -61,7 +61,7 @@ def main():
                 resource = JsonTaskStore(registry).load('active')
                 inspected = subprocess.run(['docker', 'inspect', resource['name'],
                                             '--format', '{{.State.Running}}'],
-                                           capture_output=True, text=True, timeout=10)
+                                           check=False, capture_output=True, text=True, timeout=10)
                 if inspected.returncode == 0 and inspected.stdout.strip() == 'true':
                     break
             except FileNotFoundError:
@@ -74,7 +74,7 @@ def main():
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             inspected = subprocess.run(['docker', 'inspect', resource['name']],
-                                       capture_output=True, timeout=10)
+                                       check=False, capture_output=True, timeout=10)
             if not supervisor.running(state) and inspected.returncode != 0:
                 break
             time.sleep(.1)
