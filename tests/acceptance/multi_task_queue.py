@@ -170,8 +170,10 @@ def run(state, repo, image):
         shim = binary / name
         # sh quoting protects the spaces in the installed runtime interpreter path.
         import shlex
+        bootstrap = ('import sys,runpy; sys.path.insert(0,' + repr(str(repo)) +
+                     '); runpy.run_module("tests.acceptance.multi_task_queue",run_name="__main__")')
         shim.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) +
-            ' -m tests.acceptance.multi_task_queue worker ' + shlex.quote(str(state)) +
+            ' -c ' + shlex.quote(bootstrap) + ' worker ' + shlex.quote(str(state)) +
             ' ' + shlex.quote(name) + ' "$@"\n')
         shim.chmod(0o755)
     docker = shutil.which('docker')
