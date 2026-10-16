@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from orchestrator import task_queue
 from orchestrator.github_publish import GitHubPublisher
 from orchestrator.store import JsonTaskStore
 
@@ -34,17 +35,19 @@ def records(state):
     return JsonTaskStore(state / "supervisor")
 
 
-def configure(state: Path, task_id: str, repository: str, image: str, *, merge=False,
+def configure(state: Path, task_id: str | None, repository: str, image: str, *, merge=False,
               interval=30) -> None:
     GitHubPublisher(repository)  # validate before persisting any configuration
     if not IMAGE_ID.fullmatch(image):
         raise ValueError("An immutable local sha256 image ID is required")
     if not 5 <= interval <= 3600:
         raise ValueError("Polling interval must be 5 to 3600 seconds")
-    JsonTaskStore(state / "tasks").load(task_id)
+    if task_id is not None:
+        JsonTaskStore(state / "tasks").load(task_id)
     with service_lock(state):
         records(state).save("config", {"id": "config", "task_id": task_id,
-            "repository": repository, "image": image, "merge": merge, "interval": interval})
+            "repository": repository, "image": image, "merge": merge, "interval": interval,
+            "mode": "queue" if task_id is None else "single"})
         records(state).save("health", {"id": "health", "failures": 0, "retry_after": 0})
         for name in ("stop", "cancel"):
             (state / "supervisor" / name).unlink(missing_ok=True)
@@ -72,6 +75,9 @@ def running(state):
 def status(state):
     store = records(state)
     config = store.load("config")
+    if config.get("mode") == "queue":
+        return {"running": running(state), "mode": "queue", "merge_enabled": config["merge"],
+                **task_queue.summary(state)}
     task = JsonTaskStore(state / "tasks").load(config["task_id"])
     health = store.load("health")
     return {"running": running(state), "task_id": task["id"], "task_status": task["status"],
@@ -81,9 +87,23 @@ def status(state):
             "supervisor": health}
 
 
-def request(state, command):
-    records(state)
-    marker = state / "supervisor" / command
+def request(state, command, task_id=None):
+    try:
+        config = (json.loads((state / "supervisor" / "config.json").read_text())
+                  if task_id or command == "cancel" else {})
+    except FileNotFoundError:
+        config = {}
+    if task_id and config.get("mode", "single") != "queue" and task_id != config.get("task_id"):
+        raise ValueError("--task must match the configured single task")
+    if command == "cancel" and config.get("mode") == "queue":
+        with task_queue.locked_queue(state) as queue:
+            task_id = task_id or queue["active_task"]
+            if not task_id or task_id not in {j["task_id"] for j in queue["jobs"]}:
+                raise ValueError("Queue cancellation requires an enrolled --task ID")
+        marker = task_queue.cancel_path(state, task_id)
+    else:
+        records(state)
+        marker = state / "supervisor" / command
     marker.touch(mode=0o600)
     if command != "cancel":
         return
@@ -92,7 +112,7 @@ def request(state, command):
             # Holding the lifetime lock excludes a service and its active phase.
             # Publish the marker first so a busy service can reap its own phase.
             config = records(state).load("config")
-            cancel_task(state, config["task_id"])
+            cancel_task(state, task_id or config["task_id"])
             marker.unlink(missing_ok=True)
     except ServiceAlreadyRunning:
         # The running service consumes the marker only after phase cleanup.
@@ -157,13 +177,29 @@ def run_phase(state, command, stopping, *, timeout=1200):
 
 
 def tick(state, config, stopping, *, phase=run_phase, now=time.time):
-    control = state / "supervisor"
-    if (control / "cancel").exists():
+    if config.get("mode") == "queue":
+        selected = task_queue.select_task(state, now=datetime.fromtimestamp(now(), UTC))
+        if selected is None:
+            return
+        try:
+            _tick_task(state, dict(config, task_id=selected), stopping, phase=phase, now=now,
+                       health=task_queue.health(state, selected),
+                       cancellation=task_queue.cancel_path(state, selected))
+        finally:
+            with task_queue.locked_queue(state) as queue:
+                queue["active_task"] = None
+        return
+    _tick_task(state, config, stopping, phase=phase, now=now)
+
+
+def _tick_task(state, config, stopping, *, phase, now, health=None, cancellation=None):
+    cancellation = cancellation or state / "supervisor" / "cancel"
+    if cancellation.exists():
         cancel_task(state, config["task_id"])
-        (control / "cancel").unlink(missing_ok=True)
+        cancellation.unlink(missing_ok=True)
         return
     store = records(state)
-    health = store.load("health")
+    health = health or store.load("health")
     if health["failures"] >= 3 or health["retry_after"] > now():
         return
     task = JsonTaskStore(state / "tasks").load(config["task_id"])
@@ -171,14 +207,15 @@ def tick(state, config, stopping, *, phase=run_phase, now=time.time):
         return
     if task.get("retry_at") and datetime.fromisoformat(task["retry_at"]) > datetime.now(UTC):
         return
-    code = phase(state, phase_command(state, config, task), stopping)
+    code = phase(state, phase_command(state, config, task),
+                 lambda: stopping() or cancellation.exists())
     # Cancellation takes precedence over retry bookkeeping, after phase cleanup.
-    if (control / "cancel").exists():
+    if cancellation.exists():
         cancel_task(state, config["task_id"])
-        (control / "cancel").unlink(missing_ok=True)
+        cancellation.unlink(missing_ok=True)
     elif code is not None:
         failures = health["failures"] + 1 if code else 0
-        store.save("health", {"id": "health", "failures": failures,
+        store.save(health["id"], {"id": health["id"], "failures": failures,
             "retry_after": now() + min(300, 30 * 2 ** failures) if failures else 0,
             "last_exit_code": code, "updated_at": datetime.now(UTC).isoformat()})
 
@@ -237,7 +274,7 @@ def start(state):
 def launch_agent(state, output):
     # Write a reviewable macOS login-agent artifact; installation is explicit.
     config = records(state).load("config")
-    label = "local.auto-ai-gen." + config["task_id"]
+    label = "local.auto-ai-gen." + (config["task_id"] or "queue")
     output.write_bytes(plistlib.dumps({"Label": label,
         "ProgramArguments": [sys.executable, "-m", "orchestrator.supervisor", "--state",
                              str(state.resolve()), "serve"],
@@ -257,8 +294,18 @@ def main():
     setup.add_argument("--image", required=True)
     setup.add_argument("--interval", type=int, default=30)
     setup.add_argument("--merge-verified", action="store_true")
-    for name in ("start", "serve", "stop", "status", "cancel"):
+    queue_setup = sub.add_parser("configure-queue")
+    queue_setup.add_argument("--repository", required=True)
+    queue_setup.add_argument("--image", required=True)
+    queue_setup.add_argument("--interval", type=int, default=30)
+    queue_setup.add_argument("--merge-verified", action="store_true")
+    enroll = sub.add_parser("enqueue")
+    enroll.add_argument("task_id")
+    enroll.add_argument("--after", action="append", default=[])
+    for name in ("start", "serve", "stop", "status"):
         sub.add_parser(name)
+    cancel = sub.add_parser("cancel")
+    cancel.add_argument("--task")
     agent = sub.add_parser("launch-agent")
     agent.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -266,6 +313,11 @@ def main():
     if args.command == "configure":
         configure(state, args.task_id, args.repository, args.image,
                   merge=args.merge_verified, interval=args.interval)
+    elif args.command == "configure-queue":
+        configure(state, None, args.repository, args.image,
+                  merge=args.merge_verified, interval=args.interval)
+    elif args.command == "enqueue":
+        task_queue.enqueue(state, args.task_id, args.after)
     elif args.command == "start":
         start(state)
     elif args.command == "serve":
@@ -275,7 +327,7 @@ def main():
     elif args.command == "launch-agent":
         launch_agent(state, args.output)
     else:
-        request(state, args.command)
+        request(state, args.command, getattr(args, "task", None))
 
 
 if __name__ == "__main__":
