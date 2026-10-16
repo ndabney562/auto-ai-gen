@@ -49,3 +49,19 @@ def test_concurrent_source_edit_prevents_entire_patch(tmp_path):
                        {"docs/a.md": "new", "docs/b.md": "new"})
     assert (tmp_path / "docs/a.md").read_text() == "other worker"
     assert not (tmp_path / "docs/b.md").exists()
+
+
+def test_rollback_before_new_parent_created(tmp_path, monkeypatch):
+    from orchestrator import patch_transaction as transaction
+
+    original_replace = transaction._replace
+
+    def replace(path, content):
+        if path.name == "new.md":
+            raise OSError("parent creation failed")
+        return original_replace(path, content)
+
+    monkeypatch.setattr(transaction, "_replace", replace)
+    with pytest.raises(OSError, match="parent creation failed"):
+        apply_patchset(tmp_path, {"docs/nested/new.md": ""}, {"docs/nested/new.md": "new"})
+    assert not (tmp_path / ".agent-patch.json").exists()

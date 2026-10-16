@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -42,9 +45,20 @@ def save_provider_health(path: str | Path, providers: list[ProviderHealth]) -> N
     }
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    temporary.replace(target)
+    fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=".health-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        directory = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def load_provider_health(path: str | Path) -> list[ProviderHealth]:
@@ -65,3 +79,14 @@ def load_provider_health(path: str | Path) -> list[ProviderHealth]:
             )
         )
     return providers
+
+
+def record_provider_error(path: str | Path, name: str, error: ClassifiedProviderError) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        providers = {p.name: p for p in load_provider_health(target)}
+        sanitized = ClassifiedProviderError(error.kind, error.retryable, error.retry_after_seconds)
+        providers[name] = health_after_error(name, sanitized)
+        save_provider_health(target, list(providers.values()))

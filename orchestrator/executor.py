@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator.audit import AuditLog
+from orchestrator.provider_state import record_provider_error
 from orchestrator.runtime import WorkerFactory, execute_with_failover
 from orchestrator.store import JsonTaskStore
 from providers.errors import normalize_sdk_error
@@ -37,8 +38,12 @@ def execute_claimed_task(
     *,
     audit_path: str | Path,
     heartbeat_seconds: float = 30,
+    lease_seconds: float = 120,
+    provider_health_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Execute under a renewable lease; only verified orchestration can finish work."""
+    if not 0 < heartbeat_seconds < lease_seconds:
+        raise ValueError("Heartbeat interval must be shorter than the lease")
     task_id = str(task["id"])
     audit = AuditLog(audit_path)
     if task.get("status") != "CLAIMED":
@@ -57,7 +62,7 @@ def execute_claimed_task(
     running["status"] = "EXECUTING"
     running["attempt"] = int(task.get("attempt", 0)) + 1
     running["lease"] = {"token": token,
-                        "expires_at": (datetime.now(UTC) + timedelta(seconds=120)).isoformat()}
+                        "expires_at": (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()}
     if not store.compare_and_save(task, running):
         raise LeaseLost("Task changed before execution")
     audit.append("execution_started", task_id=task_id, owner=running.get("owner"))
@@ -73,7 +78,7 @@ def execute_claimed_task(
                     return
                 updated = dict(current)
                 updated["lease"] = {"token": token, "expires_at": (
-                    datetime.now(UTC) + timedelta(seconds=120)).isoformat()}
+                    datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()}
                 if not store.compare_and_save(current, updated):
                     lost.set()
                     return
@@ -94,6 +99,8 @@ def execute_claimed_task(
         provider, result = execute_with_failover(
             handoff, provider_source(), factories,
             preferred=(running.get("owner") or {}).get("provider"),
+            on_error=(lambda name, error: record_provider_error(provider_health_path, name, error))
+            if provider_health_path is not None else None,
         )
     except Exception as exc:  # noqa: BLE001 - persist failure without logging provider secrets
         logger.warning("Execution failed for %s: %s", task_id, type(exc).__name__)
@@ -126,6 +133,7 @@ def execute_claimed_task(
         checkpoint = dict(current.get("checkpoint") or {})
         checkpoint.update({"task_id": task_id, "phase": "VALIDATING",
                            "implementation_provider": provider,
+                           "session_id": result.session_id,
                            "next_action": "validate_candidate"})
         updated["checkpoint"] = checkpoint
         updated["next_action"] = {"type": "validate_candidate"}

@@ -64,6 +64,7 @@ def run_scheduler_loop(
                         lambda snapshot=providers: snapshot,
                         factories,
                         audit_path=audit_path,
+                        provider_health_path=provider_health_path,
                     )
                 except Exception:
                     # Executor persists the error and requeues the task for recovery.

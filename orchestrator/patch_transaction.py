@@ -57,7 +57,8 @@ def _recover(root: Path) -> None:
         target = safe_target(root, name)
         if content is None:
             target.unlink(missing_ok=True)
-            _sync(target.parent)
+            if target.parent.exists():
+                _sync(target.parent)
         else:
             _replace(target, content)
     journal.unlink()

@@ -59,3 +59,29 @@ def test_persisted_cooldown_blocks_dispatch_until_retry_time(tmp_path) -> None:
         max_ticks=1,
     )
     assert store.load("TP-51")["status"] == "CLAIMED"
+
+
+def test_runtime_persists_new_failure_cooldown(tmp_path):
+    import pytest
+
+    from orchestrator.executor import execute_claimed_task
+    from orchestrator.scheduler import dispatch_task
+
+    class RateLimit(RuntimeError):
+        status_code = 429
+
+    class Worker:
+        def execute(self, handoff):
+            raise RateLimit("sensitive response must not be persisted")
+
+    store = JsonTaskStore(tmp_path / "tasks")
+    task = dispatch_task({"id": "t", "status": "READY"}, [ProviderHealth("openai")])
+    store.save("t", task)
+    health = tmp_path / "health.json"
+    with pytest.raises(RuntimeError):
+        execute_claimed_task(store, task, lambda: [ProviderHealth("openai")], {"openai": Worker},
+                             audit_path=tmp_path / "audit", provider_health_path=health)
+    restored = load_provider_health(health)
+    assert restored[0].state == ProviderState.RATE_LIMITED
+    assert not restored[0].available()
+    assert "sensitive" not in health.read_text()
