@@ -21,12 +21,22 @@ ID. Create a task with `orchestrator.subscription_runner create` first.
 .venv/bin/python -m orchestrator.supervisor --state /path/to/state start
 .venv/bin/python -m orchestrator.supervisor --state /path/to/state status
 .venv/bin/python -m orchestrator.supervisor --state /path/to/state stop
+.venv/bin/python -m orchestrator.supervisor --state /path/to/state cancel
 ```
 
 `start` detaches from the terminal. A lifetime file lock prevents duplicate services.
 `stop` interrupts the active phase and preserves checkpoints; use `start` to resume.
-`cancel` interrupts and reaps the phase before recording CANCELLED, retaining all
-completed-work evidence. Cancellation cannot undo an already published PR or
+`cancel` writes a pending marker and attempts the same nonblocking lifetime lock.
+If the service is stopped, cancellation records CANCELLED immediately while holding
+that lock, without starting a service or worker. This also applies to READY tasks
+and tasks waiting for CI. If a service holds the lock, cancellation remains pending;
+the service interrupts and reaps its active phase before recording CANCELLED.
+Successful cancellation removes the pending marker and retains all completed-work
+evidence and checkpoints. DONE, CANCELLED, and FAILED_PERMANENT task records are
+left unchanged. Only a busy service lock is treated as deferred cancellation;
+unexpected lock, storage, or concurrent-update errors are reported. A failed
+cancellation leaves the pending marker available for a later attempt. Cancellation
+does not clear a stop marker. Cancellation cannot undo an already published PR or
 completed merge. Use this service as the sole driver of its dedicated state directory.
 
 Each phase runs in a guarded subprocess, with a 20-minute wall-clock bound.
@@ -61,6 +71,7 @@ pre-login system daemon; Docker and account login stores must be available.
 
 Do not run a detached `start` service and a LaunchAgent simultaneously. A second
 service is refused by the lifetime lock. The generated artifact is not installed
-automatically. Tests exercise process death and checkpoint preservation; a full
-physical Mac reboot and unattended subscription task remain deployment acceptance
-checks.
+automatically. Tests exercise process death, immediate stopped-service cancellation,
+deferred cancellation after phase cleanup, terminal-record preservation, unexpected
+errors, and checkpoint preservation; a full physical Mac reboot and unattended
+subscription task remain deployment acceptance checks.

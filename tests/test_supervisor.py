@@ -93,14 +93,151 @@ def test_cancel_preserves_checkpoint_and_prevents_phase(tmp_path, status):
     assert task['checkpoint']['completed_work'] == ['retained']
 
 
-def test_cancel_during_phase_waits_for_cleanup(tmp_path):
+@pytest.mark.parametrize('status', ['READY', 'WAIT_CI'])
+def test_stopped_cancel_is_immediate_without_worker(tmp_path, monkeypatch, status):
+    config = setup(tmp_path, status)
+    store = JsonTaskStore(tmp_path / 'tasks')
+    before = store.load('task')
+    health = s.records(tmp_path).load('health')
+    s.request(tmp_path, 'stop')
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('cancellation must not launch a worker')
+
+    monkeypatch.setattr(s.subprocess, 'Popen', unexpected)
+    s.request(tmp_path, 'cancel')
+    assert store.load('task') == dict(before, status='CANCELLED', next_action={'type': 'none'})
+    assert not s.running(tmp_path)
+    assert not (tmp_path / 'supervisor' / 'cancel').exists()
+    assert (tmp_path / 'supervisor' / 'stop').exists()
+    assert s.records(tmp_path).load('health') == health
+    s.tick(tmp_path, config, lambda: False, phase=unexpected)
+
+
+def test_active_service_defers_cancel_until_tick(tmp_path):
     config = setup(tmp_path)
+    store = JsonTaskStore(tmp_path / 'tasks')
+    before = store.load('task')
+    marker = tmp_path / 'supervisor' / 'cancel'
+    with s.service_lock(tmp_path):
+        s.request(tmp_path, 'cancel')
+        assert marker.exists()
+        assert store.load('task') == before
+        s.tick(tmp_path, config, lambda: False,
+               phase=lambda *_: pytest.fail('pending cancellation must prevent phase'))
+        assert store.load('task')['status'] == 'CANCELLED'
+        assert not marker.exists()
+
+
+def test_cancel_during_phase_waits_for_cleanup(tmp_path, monkeypatch):
+    config = setup(tmp_path)
+    store = JsonTaskStore(tmp_path / 'tasks')
+    health = s.records(tmp_path).load('health')
+    marker = tmp_path / 'supervisor' / 'cancel'
+    events = []
+    original_cancel = s.cancel_task
+
+    def cancel(state, task_id):
+        assert events == ['cleanup']
+        assert marker.exists()
+        events.append('cancel')
+        original_cancel(state, task_id)
+
+    monkeypatch.setattr(s, 'cancel_task', cancel)
 
     def phase(*_):
-        s.request(tmp_path, 'cancel')
+        try:
+            s.request(tmp_path, 'cancel')
+            assert marker.exists()
+            assert store.load('task')['status'] == 'READY'
+        finally:
+            assert store.load('task')['status'] == 'READY'
+            events.append('cleanup')
+        return 1
 
-    s.tick(tmp_path, config, lambda: False, phase=phase)
-    assert JsonTaskStore(tmp_path / 'tasks').load('task')['status'] == 'CANCELLED'
+    with s.service_lock(tmp_path):
+        s.tick(tmp_path, config, lambda: False, phase=phase)
+    assert events == ['cleanup', 'cancel']
+    assert store.load('task')['status'] == 'CANCELLED'
+    assert store.load('task')['checkpoint']['completed_work'] == ['retained']
+    assert not marker.exists()
+    assert s.records(tmp_path).load('health') == health
+
+
+@pytest.mark.parametrize('status', ['DONE', 'CANCELLED', 'FAILED_PERMANENT'])
+@pytest.mark.parametrize('active', [False, True])
+def test_cancel_leaves_terminal_records_unchanged(tmp_path, monkeypatch, status, active):
+    config = setup(tmp_path, status)
+    store = JsonTaskStore(tmp_path / 'tasks')
+    before = store.load('task')
+    task_files = {p: p.read_bytes() for p in (tmp_path / 'tasks').rglob('*.json')}
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('terminal records must not be written')
+
+    monkeypatch.setattr(JsonTaskStore, 'compare_and_save', unexpected)
+    if active:
+        with s.service_lock(tmp_path):
+            s.request(tmp_path, 'cancel')
+            s.tick(tmp_path, config, lambda: False, phase=unexpected)
+    else:
+        s.request(tmp_path, 'cancel')
+    assert store.load('task') == before
+    assert {p: p.read_bytes() for p in (tmp_path / 'tasks').rglob('*.json')} == task_files
+    assert not (tmp_path / 'supervisor' / 'cancel').exists()
+
+
+@pytest.mark.parametrize('error', [PermissionError('lock denied'), RuntimeError('lock failed')])
+@pytest.mark.parametrize('operation', ['cancel', 'running'])
+def test_unexpected_lock_errors_propagate(tmp_path, monkeypatch, error, operation):
+    setup(tmp_path)
+
+    def fail(*_):
+        raise error
+
+    # fcntl is shared with JsonTaskStore; restore it before inspecting records.
+    with monkeypatch.context() as patch:
+        patch.setattr(s.fcntl, 'flock', fail)
+        with pytest.raises(type(error), match=str(error)) as caught:
+            if operation == 'cancel':
+                s.request(tmp_path, 'cancel')
+            else:
+                s.running(tmp_path)
+        assert caught.value is error
+    assert JsonTaskStore(tmp_path / 'tasks').load('task')['status'] == 'READY'
+    assert (tmp_path / 'supervisor' / 'cancel').exists() == (operation == 'cancel')
+    assert not s.running(tmp_path)
+
+
+def test_cancel_compare_failure_propagates_and_retains_marker(tmp_path, monkeypatch):
+    setup(tmp_path)
+    monkeypatch.setattr(JsonTaskStore, 'compare_and_save', lambda *_: False)
+    with pytest.raises(RuntimeError, match='Task changed during cancellation'):
+        s.request(tmp_path, 'cancel')
+    assert JsonTaskStore(tmp_path / 'tasks').load('task')['status'] == 'READY'
+    assert (tmp_path / 'supervisor' / 'cancel').exists()
+    assert not s.running(tmp_path)
+
+
+def test_cancel_missing_config_propagates(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        s.request(tmp_path, 'cancel')
+    assert (tmp_path / 'supervisor' / 'cancel').exists()
+    assert not s.running(tmp_path)
+
+
+def test_stop_only_writes_marker(tmp_path, monkeypatch):
+    setup(tmp_path)
+    store = JsonTaskStore(tmp_path / 'tasks')
+    before = store.load('task')
+
+    def unexpected(*_):
+        pytest.fail('stop must not acquire the lifetime lock')
+
+    monkeypatch.setattr(s, 'service_lock', unexpected)
+    s.request(tmp_path, 'stop')
+    assert (tmp_path / 'supervisor' / 'stop').exists()
+    assert store.load('task') == before
 
 
 def test_launch_agent_contains_no_credentials_and_uses_absolute_paths(tmp_path, monkeypatch):
