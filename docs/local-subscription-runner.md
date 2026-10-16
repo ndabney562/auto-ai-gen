@@ -1,9 +1,12 @@
 # Local subscription runner prototype
 
-Status: supervised prototype. Live subscription handoffs, isolated validation,
-independent exact-commit reviews, real CI-failure repair, active interruption
-recovery, PR reconciliation, and one explicitly approved supervised merge have passed. The full unattended acceptance matrix remains
-incomplete; automatic merging stays guarded. See [live results](live-subscription-pilot.md).
+Status: bounded local execution prototype with a durable assigned-task queue,
+restart recovery, subscription cooldowns, and automatic integration recovery.
+Live subscription handoffs, isolated validation, independent exact-commit reviews,
+real CI-failure repair and publication recovery have passed supervised trials.
+A local three-task unattended trial passed using fixture CLIs/local publication;
+real-model multi-task completion after a genuine quota reset and physical reboot
+acceptance remain to be observed. See [queue/integration evidence](queue-integration-acceptance.md).
 
 The default runtime now selects installed `codex` and `claude` commands. It never
 selects the API workers from environment keys. CLI children receive a minimal
@@ -33,7 +36,7 @@ from this trusted checkout, before introducing generated changes:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r validation/requirements.lock
 docker build -f validation/Dockerfile -t auto-ai-gen-validator:local .
 codex login status
 claude auth status
@@ -82,7 +85,9 @@ Repair attempts are bounded. New provider failures persist sanitized cooldowns.
 Publishing reconciles an existing branch/PR, including after a crash. Each repaired
 candidate has its own branch. Re-running `publish` reads failed CI logs and routes
 failures back to REPAIR; use `run` again for the bounded repair cycle. The [background supervisor](background-supervisor.md) can drive these phases for
-one explicitly configured task, with merging disabled by default.
+an explicitly assigned task or durable queue, with merging disabled by default.
+When main advances, [integration recovery](automatic-integration.md) creates a new
+candidate and requires fresh validation, independent review and exact-head CI.
 
 `publish --merge-verified` is opt-in for after supervised acceptance. It requires
 matching candidate validation/review, latest successful exact-head CI with Lint

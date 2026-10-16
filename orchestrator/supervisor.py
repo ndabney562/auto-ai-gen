@@ -136,7 +136,8 @@ def phase_command(state, config, task):
     if task["status"] == "WAIT_CI":
         return [*base, "publish", config["task_id"], "--repository", config["repository"],
                 *(["--merge-verified"] if config["merge"] else [])]
-    return [*base, "step", config["task_id"], "--image", config["image"]]
+    return [*base, "step", config["task_id"], "--image", config["image"],
+            "--repository", config["repository"]]
 
 
 def terminate(child):

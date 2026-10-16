@@ -1,8 +1,9 @@
 # Local background supervisor
 
-The supervisor drives one explicitly selected task through implementation,
+The supervisor drives explicitly assigned tasks through implementation,
 isolated validation, independent review, PR publication, CI polling, and bounded
-repair. It does not discover new objectives or start every saved task. Merging is
+repair. It supports a single task or a [durable dependency-aware queue](durable-queue.md).
+It does not invent new objectives or start unenrolled saved tasks. Merging is
 off by default. `--merge-verified` enables only the existing exact-commit,
 protected-main merge gate. The coordinator enforces independent model review;
 GitHub enforces up-to-date CI for pull requests, including administrator merges.

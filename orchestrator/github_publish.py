@@ -6,6 +6,10 @@ import subprocess
 from pathlib import Path
 
 
+class MainAdvanced(ValueError):
+    """Main moved after candidate checks; the runner must integrate and revalidate."""
+
+
 class GitHubPublisher:
     def __init__(self, repository: str):
         parts = repository.split("/")
@@ -17,6 +21,30 @@ class GitHubPublisher:
     def _gh(self, *args):
         return subprocess.run(["gh", *args], check=True, capture_output=True,
                               text=True, timeout=90).stdout
+
+    def fetch_main(self, workspace: Path) -> str:
+        config = ["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
+                  "-c", "credential.helper=!gh auth git-credential", "-C", str(workspace)]
+        subprocess.run([*config, "fetch", "--no-tags", f"https://github.com/{self.repository}.git",
+                        "+refs/heads/main:refs/agent/upstream-main"],
+                       check=True, capture_output=True, timeout=90)
+        return subprocess.run([*config, "rev-parse", "refs/agent/upstream-main^{commit}"],
+            check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+
+    def lookup_pr(self, number: int) -> dict:
+        value = json.loads(self._gh("api", f"repos/{self.repository}/pulls/{number}"))
+        if value["head"]["repo"]["full_name"] != self.repository or value["base"]["ref"] != "main":
+            raise ValueError("PR provenance changed")
+        return {"number": number, "url": value["html_url"], "headRefOid": value["head"]["sha"],
+                "state": "MERGED" if value.get("merged") else value["state"].upper()}
+
+    def supersede(self, old: dict, replacement: dict) -> None:
+        pr = self.lookup_pr(old["number"])
+        if pr["headRefOid"] != old["headRefOid"]:
+            raise ValueError("Superseded PR changed; refusing to close it")
+        if pr["state"] == "OPEN":
+            self._gh("api", "--method", "PATCH",
+                     f"repos/{self.repository}/pulls/{old['number']}", "-f", "state=closed")
 
     def publish(self, workspace: Path, task_id: str, sha: str) -> dict:
         if not task_id.isalnum() or len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
@@ -63,7 +91,7 @@ class GitHubPublisher:
             raise ValueError("Candidate PR is closed")
         main = json.loads(self._gh("api", f"{prefix}/git/ref/heads/main"))
         if main["object"]["sha"] != base_sha:
-            raise ValueError("Main advanced; rebase and revalidate before merging")
+            raise MainAdvanced("Main advanced; rebase and revalidate before merging")
         runs = json.loads(self._gh("api", f"{prefix}/actions/runs?head_sha={sha}&per_page=100"))
         eligible = [run for run in runs["workflow_runs"] if run["name"] == "CI"
                     and run["head_sha"] == sha and run["event"] == "pull_request"

@@ -68,3 +68,17 @@ def test_auto_merge_requires_server_enforced_strict_checks(monkeypatch):
     with pytest.raises(ValueError, match="strict verify"):
         worker.verified_merge(1, "candidate", "base")
     assert not any("PUT" in call for call in calls)
+
+
+def test_superseded_pr_is_closed_only_at_recorded_head(monkeypatch):
+    worker = GitHubPublisher('example/repo')
+    calls = []
+    monkeypatch.setattr(worker, 'lookup_pr', lambda number: {
+        'number': number, 'headRefOid': 'known', 'state': 'OPEN'})
+    monkeypatch.setattr(worker, '_gh', lambda *args: calls.append(args) or '{}')
+    worker.supersede({'number': 7, 'headRefOid': 'known'}, {'number': 8})
+    assert calls[0][-1] == 'state=closed'
+    calls.clear()
+    with pytest.raises(ValueError, match='changed'):
+        worker.supersede({'number': 7, 'headRefOid': 'different'}, {'number': 8})
+    assert calls == []

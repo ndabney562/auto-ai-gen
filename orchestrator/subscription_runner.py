@@ -28,14 +28,15 @@ from providers.errors import normalize_sdk_error
 from providers.subscription_limits import LIMIT_FAILURES
 
 
-def git(repo: Path, *args: str, text: str | None = None) -> str:
+def git(repo: Path, *args: str, text: str | None = None, strip: bool = True) -> str:
     env = {key: value for key, value in os.environ.items() if key in {"PATH", "HOME", "TMPDIR"}}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
                GIT_AUTHOR_NAME="Local Agent", GIT_AUTHOR_EMAIL="agent@localhost",
                GIT_COMMITTER_NAME="Local Agent", GIT_COMMITTER_EMAIL="agent@localhost")
-    return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
+    output = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
                           input=text, capture_output=True, text=True, check=True, env=env,
-                          timeout=60).stdout.strip()
+                          timeout=60).stdout
+    return output.strip() if strip else output
 
 
 def create_task(state: Path, repo: Path, objective: str, targets: list[str], ref: str) -> str:
@@ -61,7 +62,8 @@ def create_task(state: Path, repo: Path, objective: str, targets: list[str], ref
     return task_id
 
 
-def candidate_commit(repo: Path, base: str, targets: list[str], output: str) -> str:
+def candidate_commit(repo: Path, base: str, targets: list[str], output: str, *,
+                     reject_conflicts: bool = False) -> str:
     """Build a complete Git tree without sequentially mutating working files."""
     payload = json.loads(output)
     files = payload.get("files")
@@ -75,6 +77,9 @@ def candidate_commit(repo: Path, base: str, targets: list[str], output: str) -> 
         if not content.strip() or len(content.encode()) > MAX_GENERATED_BYTES:
             raise ValueError("Invalid generated file size")
         safe_target(repo, name)
+        if reject_conflicts and any(line.startswith(("<<<<<<< ", ">>>>>>> ", "||||||| "))
+                                    for line in content.splitlines()):
+            raise ValueError("Integration conflict markers remain")
         if name.endswith(".py"):
             ast.parse(content, filename=name)
         contents[name] = content
@@ -155,11 +160,22 @@ def _save(store, before, after):
 
 
 def advance_task(state: Path, task_id: str, *, image: str = "auto-ai-gen-validator:local",
-                 factories=None, health=None, validator=docker_validate) -> dict:
+                 factories=None, health=None, validator=docker_validate, repository=None) -> dict:
     """Advance one durable phase. Use this driver alone for its dedicated state directory."""
     state.mkdir(parents=True, exist_ok=True)
     with (state / ".runner.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if repository:
+            from orchestrator.github_publish import GitHubPublisher
+            from orchestrator.integration import begin, finish
+
+            store = JsonTaskStore(state / "tasks")
+            task = store.load(task_id)
+            if task["status"] == "READY":
+                latest = GitHubPublisher(repository).fetch_main(Path(task["checkpoint"]["workspace"]))
+                synced = begin(store, task, latest, return_phase="READY")
+                if synced != task:
+                    return finish(store, synced) if synced["status"] == "INTEGRATING" else synced
         return _advance(state, task_id, image, factories or default_factories(),
                         available_health() if health is None else health, validator)
 
@@ -185,16 +201,19 @@ def _advance(state, task_id, image, factories, health, validator):
         from orchestrator.recovery import recover_after_restart
         recovered = recover_after_restart(task)
         return _save(store, task, recovered) if recovered != task else task
+    if status == "INTEGRATING":
+        from orchestrator.integration import finish
+        return finish(store, task)
     if status == "REPAIR":
         return _save(store, task, dict(task, status="READY"))
     if status == "READY":
         sources = {}
         for name in task["targets"]:
-            path = safe_target(repo, name)
+            safe_target(repo, name)
             repair_sha = (checkpoint.get("repair_candidate_sha") or
                           (checkpoint.get("previous_pull_request") or {}).get("headRefOid"))
-            sources[name] = (git(repo, "show", f"{repair_sha}:{name}") if repair_sha else
-                             path.read_text() if path.exists() else "")
+            from orchestrator.integration import blob
+            sources[name] = blob(repo, repair_sha or checkpoint["base_sha"], name)
             limit = MAX_GENERATED_BYTES if repair_sha else MAX_SOURCE_BYTES
             if len(sources[name].encode()) > limit:
                 raise ValueError("Source context exceeds limit")
@@ -202,7 +221,8 @@ def _advance(state, task_id, image, factories, health, validator):
                   "(objects with path and complete content) and summary. Include exactly the "
                   "requested paths. No tools or markdown fences.\n" + json.dumps({
                       "objective": task["objective"], "sources": sources,
-                      "failures": checkpoint.get("known_failures", [])}))
+                      "failures": checkpoint.get("known_failures", []),
+                      "integration_conflicts": checkpoint.get("integration_conflicts", {})}))
 
         class ProposalWorker:
             def __init__(self, worker):
@@ -229,7 +249,8 @@ def _advance(state, task_id, image, factories, health, validator):
         try:
             sha = checkpoint.get("candidate_sha")
             if not sha:
-                sha = candidate_commit(repo, checkpoint["base_sha"], task["targets"], task["result"])
+                sha = candidate_commit(repo, checkpoint["base_sha"], task["targets"], task["result"],
+                                       reject_conflicts=bool(checkpoint.get("integration_conflicts")))
                 checkpoint["candidate_sha"] = sha
                 task = _save(store, task, dict(task, checkpoint=dict(checkpoint)))
             validation = validator(repo, sha, image)
@@ -261,7 +282,8 @@ def _advance(state, task_id, image, factories, health, validator):
                   "Return ONLY JSON: approved (boolean), candidate_sha (exact input SHA), reason.\n" +
                   json.dumps({"objective": task["objective"], "candidate_sha": sha,
                               "diff": diff, "validation": task["validation"],
-                              "previous_failures": checkpoint.get("known_failures", [])}))
+                              "previous_failures": checkpoint.get("known_failures", []),
+                              "integration_conflicts": checkpoint.get("integration_conflicts", {})}))
         count = int(checkpoint.get("review_attempt", 0))
         if count >= 3:
             checkpoint["resume_phase"] = "REVIEW"
@@ -307,6 +329,7 @@ def _repair(store, task, checkpoint, reason):
     failed_sha = checkpoint.pop("candidate_sha", None)
     if failed_sha:
         checkpoint["repair_candidate_sha"] = failed_sha
+        checkpoint["repair_base_sha"] = checkpoint["base_sha"]
     checkpoint.pop("resume_phase", None)
     checkpoint.pop("review_attempt", None)
     checkpoint.pop("review", None)
@@ -340,13 +363,36 @@ def publish_task(state: Path, task_id: str, repository: str, *, merge: bool = Fa
         pr = publisher.publish(Path(checkpoint["workspace"]), task_id, sha)
         checkpoint["pull_request"] = pr
         task = _save(store, task, dict(task, checkpoint=checkpoint))
+        if pr.get("state") != "MERGED" and hasattr(publisher, "fetch_main"):
+            from orchestrator.integration import begin, finish
+
+            latest = publisher.fetch_main(Path(checkpoint["workspace"]))
+            if latest != checkpoint["base_sha"]:
+                pr = publisher.lookup_pr(pr["number"])
+                if pr["headRefOid"] != sha:
+                    raise ValueError("Published candidate changed")
+                if pr["state"] != "MERGED":
+                    synced = begin(store, task, latest, return_phase="VALIDATING")
+                    return finish(store, synced) if synced["status"] == "INTEGRATING" else synced
+        for old in checkpoint.get("superseded_pull_requests", []):
+            if hasattr(publisher, "supersede"):
+                publisher.supersede(old, pr)
         failure = None if pr.get("state") == "MERGED" else publisher.ci_failure(sha)
         if failure is not None:
             checkpoint = dict(checkpoint)
             checkpoint["previous_pull_request"] = pr
             return _repair(store, task, checkpoint, failure)
-        if pr.get("state") == "MERGED" or (
-                merge and publisher.verified_merge(pr["number"], sha, checkpoint["base_sha"])):
+        from orchestrator.github_publish import MainAdvanced
+
+        try:
+            merged = pr.get("state") == "MERGED" or (
+                merge and publisher.verified_merge(pr["number"], sha, checkpoint["base_sha"]))
+        except MainAdvanced:
+            from orchestrator.integration import begin, finish
+            synced = begin(store, task, publisher.fetch_main(Path(checkpoint["workspace"])),
+                           return_phase="VALIDATING")
+            return finish(store, synced) if synced["status"] == "INTEGRATING" else synced
+        if merged:
             checkpoint["merged_candidate_sha"] = sha
             # Preserve the declared WAIT_CI -> REVIEW -> DONE acceptance gate.
             task = _save(store, task, dict(task, status="REVIEW", checkpoint=dict(checkpoint)))
@@ -367,6 +413,7 @@ def main():
         step = sub.add_parser(command)
         step.add_argument("task_id")
         step.add_argument("--image", default="auto-ai-gen-validator:local")
+        step.add_argument("--repository")
     publish = sub.add_parser("publish")
     publish.add_argument("task_id")
     publish.add_argument("--repository", required=True)
@@ -391,7 +438,7 @@ def main():
             _save(store, task, resumed)
             save_provider_health(args.state / "provider-health.json", available_health())
         while True:
-            task = advance_task(args.state, args.task_id, image=args.image)
+            task = advance_task(args.state, args.task_id, image=args.image, repository=args.repository)
             print(json.dumps({"id": task["id"], "status": task["status"],
                               "next_action": task["next_action"]}), flush=True)
             if args.command != "run" or task["status"] in {
