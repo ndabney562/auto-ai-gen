@@ -320,7 +320,7 @@ def publish_task(state: Path, task_id: str, repository: str, *, merge: bool = Fa
         pr = publisher.publish(Path(checkpoint["workspace"]), task_id, sha)
         checkpoint["pull_request"] = pr
         task = _save(store, task, dict(task, checkpoint=checkpoint))
-        failure = publisher.ci_failure(sha)
+        failure = None if pr.get("state") == "MERGED" else publisher.ci_failure(sha)
         if failure is not None:
             checkpoint = dict(checkpoint)
             checkpoint["previous_pull_request"] = pr

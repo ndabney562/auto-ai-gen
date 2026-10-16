@@ -4,7 +4,8 @@ The supervisor drives one explicitly selected task through implementation,
 isolated validation, independent review, PR publication, CI polling, and bounded
 repair. It does not discover new objectives or start every saved task. Merging is
 off by default. `--merge-verified` enables only the existing exact-commit,
-protected-main merge gate; GitHub's required approving review still applies.
+protected-main merge gate. The coordinator enforces independent model review;
+GitHub enforces up-to-date CI for pull requests, including administrator merges.
 An externally merged exact-candidate PR is reconciled to DONE even when automatic
 merging is disabled.
 

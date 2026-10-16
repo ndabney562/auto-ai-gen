@@ -298,7 +298,7 @@ def test_supervised_merge_is_reconciled_without_requesting_merge(setup_task):
             return {"number": 1, "headRefOid": sha, "state": "MERGED"}
 
         def ci_failure(self, sha):
-            return None
+            pytest.fail("An already merged candidate cannot enter CI repair")
 
         def verified_merge(self, *_):
             pytest.fail("Must not request a merge in supervised mode")
