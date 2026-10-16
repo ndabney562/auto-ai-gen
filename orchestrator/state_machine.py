@@ -9,6 +9,7 @@ class TaskState(StrEnum):
     READY = "READY"
     CLAIMED = "CLAIMED"
     EXECUTING = "EXECUTING"
+    INTEGRATING = "INTEGRATING"
     VALIDATING = "VALIDATING"
     REVIEW = "REVIEW"
     REPAIR = "REPAIR"
@@ -32,7 +33,7 @@ TERMINAL_STATES = {
 ALLOWED_TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.NEW: {TaskState.PLANNING, TaskState.CANCELLED},
     TaskState.PLANNING: {TaskState.READY, TaskState.BLOCKED, TaskState.WAIT_HUMAN},
-    TaskState.READY: {TaskState.CLAIMED, TaskState.WAIT_PROVIDER, TaskState.WAIT_DEPENDENCY,
+    TaskState.READY: {TaskState.INTEGRATING, TaskState.BLOCKED, TaskState.CLAIMED, TaskState.WAIT_PROVIDER, TaskState.WAIT_DEPENDENCY,
                       TaskState.FAILED_PERMANENT, TaskState.CANCELLED},
     TaskState.CLAIMED: {TaskState.EXECUTING, TaskState.WAIT_PROVIDER, TaskState.CANCELLED,
                         TaskState.READY, TaskState.FAILED_PERMANENT},
@@ -46,6 +47,8 @@ ALLOWED_TRANSITIONS: dict[TaskState, set[TaskState]] = {
         TaskState.WAIT_HUMAN,
         TaskState.BLOCKED,
     },
+    TaskState.INTEGRATING: {TaskState.READY, TaskState.VALIDATING, TaskState.REPAIR,
+                            TaskState.WAIT_HUMAN, TaskState.BLOCKED},
     TaskState.VALIDATING: {TaskState.REVIEW, TaskState.REPAIR, TaskState.WAIT_CI, TaskState.WAIT_HUMAN},
     TaskState.REVIEW: {TaskState.DONE, TaskState.REPAIR, TaskState.BLOCKED, TaskState.WAIT_CI,
                        TaskState.WAIT_PROVIDER, TaskState.WAIT_RETRY, TaskState.WAIT_HUMAN},
@@ -54,7 +57,7 @@ ALLOWED_TRANSITIONS: dict[TaskState, set[TaskState]] = {
     TaskState.WAIT_PROVIDER: {TaskState.READY, TaskState.CLAIMED, TaskState.CANCELLED, TaskState.REVIEW},
     TaskState.WAIT_RETRY: {TaskState.READY, TaskState.CLAIMED, TaskState.CANCELLED, TaskState.REVIEW},
     TaskState.WAIT_DEPENDENCY: {TaskState.READY, TaskState.BLOCKED, TaskState.CANCELLED},
-    TaskState.WAIT_CI: {TaskState.REVIEW, TaskState.REPAIR, TaskState.BLOCKED},
+    TaskState.WAIT_CI: {TaskState.INTEGRATING, TaskState.REVIEW, TaskState.REPAIR, TaskState.BLOCKED},
     TaskState.WAIT_HUMAN: {TaskState.READY, TaskState.CANCELLED, TaskState.BLOCKED,
                            TaskState.VALIDATING, TaskState.REVIEW},
     TaskState.BLOCKED: {TaskState.READY, TaskState.CANCELLED, TaskState.FAILED_PERMANENT},

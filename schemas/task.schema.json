@@ -29,6 +29,7 @@
         "READY",
         "CLAIMED",
         "EXECUTING",
+        "INTEGRATING",
         "VALIDATING",
         "REVIEW",
         "REPAIR",
