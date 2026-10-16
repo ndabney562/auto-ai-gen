@@ -279,3 +279,25 @@ def test_unresolved_conflict_markers_are_rejected_before_validation(prepared):
     assert task['status'] == 'REPAIR'
     assert task['validation'] is None
     assert store.load(task_id)['attempt'] == 1
+
+
+def test_ready_repair_keeps_failed_patch_and_refreshes_upstream(prepared):
+    repo, _state, task_id, workspace, store = prepared
+    task = store.load(task_id)
+    cp = task['checkpoint']
+    cp['repair_candidate_sha'] = cp.pop('candidate_sha')
+    cp['repair_base_sha'] = cp['base_sha']
+    cp.pop('review')
+    cp['known_failures'] = ['Original CI failure still needs repair']
+    task.update(status='READY', validation=None)
+    store.save(task_id, task)
+    latest = upstream(repo)
+    Publisher(repo).fetch_main(workspace)
+    task = finish(store, begin(store, task, latest, return_phase='READY'))
+    assert task['status'] == 'READY'
+    assert task['checkpoint']['known_failures'] == ['Original CI failure still needs repair']
+    sha = task['checkpoint']['repair_candidate_sha']
+    assert git(workspace, 'show', sha + ':docs/a.md') == 'goal'
+    assert git(workspace, 'show', sha + ':docs/b.md') == 'upstream'
+    assert task['checkpoint']['repair_base_sha'] == latest
+    assert task['validation'] is None
