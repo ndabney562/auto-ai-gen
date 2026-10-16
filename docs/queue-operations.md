@@ -27,4 +27,10 @@ Retries are isolated per task, so one task's retry state does not consume anothe
 
 Use `status` to inspect progress, `cancel --task TASK_ID` to cancel a task, and `stop` to stop the service. Before changing global configuration, also unload the installed LaunchAgent using the procedure in [Background supervisor](background-supervisor.md).
 
+## Troubleshooting and integration
+
+A task waiting for Claude capacity does not stop independent implementation or validation. Dependency-blocked tasks wait for confirmed merges of their dependencies. After integration, discard stale candidate validation and approval and reacquire both for the integrated candidate; review, CI, and credential-isolation requirements still apply. When the queue is idle, cancellation must name an enrolled task with `cancel --task TASK_ID`.
+
+See [Integration examples](integration-examples.md) for integration scenarios.
+
 See [Durable queue](durable-queue.md) for queue behavior and [Background supervisor](background-supervisor.md) for service lifecycle details.
