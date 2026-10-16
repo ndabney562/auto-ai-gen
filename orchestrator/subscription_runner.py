@@ -141,7 +141,7 @@ def docker_validate(repo: Path, sha: str, image: str) -> dict:
             if result.returncode in {125, 126, 127}:
                 raise subprocess.CalledProcessError(result.returncode, command)
             return {"candidate_sha": sha, "passed": result.returncode == 0,
-                    "exit_code": result.returncode,
+                    "exit_code": result.returncode, "image": image,
                     "log": (result.stdout + result.stderr)[-16000:]}
         finally:
             subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True, timeout=30)
@@ -320,12 +320,13 @@ def publish_task(state: Path, task_id: str, repository: str, *, merge: bool = Fa
         pr = publisher.publish(Path(checkpoint["workspace"]), task_id, sha)
         checkpoint["pull_request"] = pr
         task = _save(store, task, dict(task, checkpoint=checkpoint))
-        failure = publisher.ci_failure(sha)
+        failure = None if pr.get("state") == "MERGED" else publisher.ci_failure(sha)
         if failure is not None:
             checkpoint = dict(checkpoint)
             checkpoint["previous_pull_request"] = pr
             return _repair(store, task, checkpoint, failure)
-        if merge and publisher.verified_merge(pr["number"], sha, checkpoint["base_sha"]):
+        if pr.get("state") == "MERGED" or (
+                merge and publisher.verified_merge(pr["number"], sha, checkpoint["base_sha"])):
             checkpoint["merged_candidate_sha"] = sha
             # Preserve the declared WAIT_CI -> REVIEW -> DONE acceptance gate.
             task = _save(store, task, dict(task, status="REVIEW", checkpoint=dict(checkpoint)))

@@ -2,8 +2,9 @@
 
 Merged main `95126041ce068984cd1b61018a716dfe81a0502b` passed all 94 tests and
 lint in the restricted ARM64 validator, and GitHub CI passed on October 16, 2026.
-Main now requires strict `verify` checks, one approving pull-request review, and
-administrator enforcement. Force pushes and deletion are disabled.
+Main requires pull requests and strict, up-to-date `verify` checks enforced for
+administrators. Review and merge are delegated to the coding agent; an additional
+human GitHub approval is not required. Force pushes and deletion are disabled.
 
 CI and the validator install the same exact Python versions from
 `validation/requirements.lock`, requiring package hashes and binary wheels.

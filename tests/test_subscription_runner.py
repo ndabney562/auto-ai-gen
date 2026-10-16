@@ -281,3 +281,28 @@ def test_review_attempt_is_durable_before_request_and_stops_at_budget(setup_task
                           health=[ProviderHealth("anthropic")])
     assert result["status"] == "WAIT_HUMAN"
     assert result["next_action"]["type"] == "review_attempts_exhausted"
+
+
+def test_supervised_merge_is_reconciled_without_requesting_merge(setup_task):
+    from orchestrator.subscription_runner import publish_task
+
+    _, state, task_id = setup_task
+    kwargs = {"factories": {"openai": Implementer, "anthropic": Reviewer},
+              "health": [ProviderHealth("openai"), ProviderHealth("anthropic")],
+              "validator": validated}
+    for _ in range(3):
+        advance_task(state, task_id, **kwargs)
+
+    class Publisher:
+        def publish(self, workspace, task_id, sha):
+            return {"number": 1, "headRefOid": sha, "state": "MERGED"}
+
+        def ci_failure(self, sha):
+            pytest.fail("An already merged candidate cannot enter CI repair")
+
+        def verified_merge(self, *_):
+            pytest.fail("Must not request a merge in supervised mode")
+
+    task = publish_task(state, task_id, "example/repo", publisher=Publisher())
+    assert task["status"] == "DONE"
+    assert task["checkpoint"]["merged_candidate_sha"] == task["checkpoint"]["candidate_sha"]

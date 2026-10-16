@@ -81,8 +81,8 @@ Repair attempts are bounded. New provider failures persist sanitized cooldowns.
 
 Publishing reconciles an existing branch/PR, including after a crash. Each repaired
 candidate has its own branch. Re-running `publish` reads failed CI logs and routes
-failures back to REPAIR; use `run` again for the bounded repair cycle. CI and PR
-publishing currently require these explicit commands, not a background daemon.
+failures back to REPAIR; use `run` again for the bounded repair cycle. The [background supervisor](background-supervisor.md) can drive these phases for
+one explicitly configured task, with merging disabled by default.
 
 `publish --merge-verified` is opt-in for after supervised acceptance. It requires
 matching candidate validation/review, latest successful exact-head CI with Lint
@@ -99,9 +99,9 @@ subscription CLIs, simulated quota failover, independent-reviewer unavailability
 a real GitHub CI failure/model repair, coordinator process death, active Docker
 interruption, and publication checkpoint recovery. These are supervised trials.
 Inspect repository branch protection and enforce immutable dependency/image
-provenance before allowing unattended execution. Dependency locking,
-additional repository context gathering, and richer cancellation of in-flight
-external phases remain future work.
+provenance before allowing unattended execution. Validation dependencies are [hash locked](reproducible-validation.md). The local
+supervisor supports cancellation and process recovery; physical reboot acceptance
+and additional repository context gathering remain future work.
 
 Official interfaces: [Codex noninteractive mode](https://learn.chatgpt.com/docs/non-interactive-mode),
 [Claude programmatic execution](https://code.claude.com/docs/en/headless),

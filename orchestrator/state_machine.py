@@ -64,6 +64,12 @@ ALLOWED_TRANSITIONS: dict[TaskState, set[TaskState]] = {
 }
 
 
+# Cancellation remains valid throughout every nonterminal engineering phase.
+for _state, _targets in ALLOWED_TRANSITIONS.items():
+    if _state not in TERMINAL_STATES:
+        _targets.add(TaskState.CANCELLED)
+
+
 def can_transition(current: TaskState, target: TaskState) -> bool:
     return target in ALLOWED_TRANSITIONS[current]
 
