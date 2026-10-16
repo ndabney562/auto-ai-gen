@@ -5,6 +5,8 @@ isolated validation, independent review, PR publication, CI polling, and bounded
 repair. It does not discover new objectives or start every saved task. Merging is
 off by default. `--merge-verified` enables only the existing exact-commit,
 protected-main merge gate; GitHub's required approving review still applies.
+An externally merged exact-candidate PR is reconciled to DONE even when automatic
+merging is disabled.
 
 Use a trusted checkout with the locked validation dependencies, existing CLI
 subscription logins, GitHub login, and Docker running. Keep state outside source
