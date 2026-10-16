@@ -104,3 +104,63 @@ def test_backoff_prevents_immediate_reexecution(tmp_path):
                      "retry_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat()})
     run_scheduler_loop(store, lambda: [ProviderHealth("p")], poll_seconds=0, max_ticks=3)
     assert store.load("t")["status"] == "WAIT_RETRY"
+
+
+def test_subscription_limits_preserve_attempts_and_wait_for_first_provider(tmp_path):
+    from orchestrator.provider_state import load_provider_health
+    from providers.cli_provider import _failure
+
+    class Limit:
+        def __init__(self, delay):
+            self.delay = delay
+
+        def execute(self, handoff):
+            from providers.errors import (
+                ClassifiedProviderError,
+                ProviderExecutionError,
+                ProviderFailure,
+            )
+            raise ProviderExecutionError('limit', ClassifiedProviderError(
+                ProviderFailure.QUOTA_EXHAUSTED, True, self.delay))
+
+    store = JsonTaskStore(tmp_path / 'tasks')
+    health = tmp_path / 'provider-health.json'
+    for _ in range(5):
+        task = dispatch_task({'id': 't', 'status': 'READY', 'attempt': 2, 'max_attempts': 3,
+                              'checkpoint': {'completed_work': ['keep']}},
+                             [ProviderHealth('openai'), ProviderHealth('anthropic')])
+        store.save('t', task)
+        waiting = execute_claimed_task(store, task,
+            lambda: [ProviderHealth('openai'), ProviderHealth('anthropic')],
+            {'openai': lambda: Limit(7200), 'anthropic': lambda: Limit(21600)},
+            audit_path=tmp_path / 'audit', provider_health_path=health)
+        assert waiting['status'] == 'WAIT_PROVIDER'
+        assert waiting['attempt'] == 2
+        assert waiting['lease'] is None
+        assert waiting['checkpoint']['completed_work'] == ['keep']
+        assert waiting['checkpoint']['resume_phase'] == 'READY'
+        assert datetime.fromisoformat(waiting['retry_at']) == min(
+            p.retry_at for p in load_provider_health(health))
+    assert _failure('weekly limit').classified.retry_after_seconds == 3600
+
+
+def test_missing_cli_old_cooldown_cannot_trigger_early_quota_probes(tmp_path):
+    from orchestrator.provider_state import save_provider_health
+    from providers.cli_provider import _failure
+    from providers.health import ProviderState
+
+    health = tmp_path / 'provider-health.json'
+    save_provider_health(health, [ProviderHealth('anthropic', ProviderState.RATE_LIMITED,
+                                                datetime.now(UTC) - timedelta(hours=1))])
+
+    class Limit:
+        def execute(self, handoff):
+            raise _failure('weekly limit')
+
+    claimed = dispatch_task({'id': 't', 'status': 'READY'}, [ProviderHealth('openai')])
+    store = JsonTaskStore(tmp_path / 'tasks')
+    store.save('t', claimed)
+    waiting = execute_claimed_task(store, claimed, lambda: [ProviderHealth('openai')],
+        {'openai': Limit, 'anthropic': Limit}, audit_path=tmp_path / 'audit',
+        provider_health_path=health)
+    assert datetime.fromisoformat(waiting['retry_at']) > datetime.now(UTC) + timedelta(minutes=59)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from providers.base import WorkerResult
 from providers.errors import ClassifiedProviderError, ProviderExecutionError, ProviderFailure
+from providers.subscription_limits import LIMIT_FAILURES, limit_delay, reset_delay
 
 
 class CliError(ProviderExecutionError):
@@ -19,18 +21,29 @@ class CliError(ProviderExecutionError):
 
 def _failure(detail: str) -> CliError:
     text = detail.lower()
+    try:
+        payload, end = json.JSONDecoder().raw_decode(detail.lstrip())
+        if isinstance(payload, dict):
+            # Session IDs/usage metadata can contain "429" or rate-limit labels
+            # even for unrelated errors. Classify only diagnostic fields.
+            fields = {key: payload[key] for key in ("error", "errors", "message", "result",
+                      "subtype", "code", "status_code", "error_type", "type") if key in payload}
+            text = (json.dumps(fields) + detail.lstrip()[end:]).lower()
+    except ValueError:
+        pass
     if any(word in text for word in ("not logged in", "authentication", "unauthorized", "login")):
         kind, retry = ProviderFailure.AUTH_FAILURE, False
-    elif any(word in text for word in ("usage limit", "quota", "usage exhausted")):
+    elif any(word in text for word in ("usage limit", "quota", "usage exhausted", "weekly limit", "daily limit", "session limit", "hit your limit")):
         kind, retry = ProviderFailure.QUOTA_EXHAUSTED, True
-    elif any(word in text for word in ("rate limit", "rate_limit", "429")):
+    elif any(word in text for word in ("rate limit", "rate_limit")) or re.search(r"\b429\b", text):
         kind, retry = ProviderFailure.RATE_LIMITED, True
     elif any(word in text for word in ("unknown option", "unexpected argument", "invalid request")):
         kind, retry = ProviderFailure.INVALID_REQUEST, False
     else:
         kind, retry = ProviderFailure.OUTAGE, True
     # Raw CLI diagnostics may contain credentials or prompt text. Never persist them.
-    return CliError(f"Coding CLI failed: {kind.value}", ClassifiedProviderError(kind, retry))
+    delay = (reset_delay(detail) or limit_delay(kind)) if kind in LIMIT_FAILURES else None
+    return CliError(f"Coding CLI failed: {kind.value}", ClassifiedProviderError(kind, retry, delay))
 
 
 def subscription_environment() -> dict[str, str]:
@@ -102,7 +115,7 @@ class CliWorker:
         except subprocess.TimeoutExpired as exc:
             raise _failure("connection timeout") from exc
         if code != 0:
-            raise _failure(err or out)
+            raise _failure(out + "\n" + err)
         if self.name == "openai-codex-cli":
             return _codex_result(out)
         if self.name == "anthropic-claude-cli":

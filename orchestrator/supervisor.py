@@ -76,7 +76,9 @@ def status(state):
     health = store.load("health")
     return {"running": running(state), "task_id": task["id"], "task_status": task["status"],
             "next_action": task.get("next_action", {}).get("type"),
-            "merge_enabled": config["merge"], "supervisor": health}
+            "merge_enabled": config["merge"], "retry_at": task.get("retry_at"),
+            "waiting_provider": task.get("next_action", {}).get("provider"),
+            "supervisor": health}
 
 
 def request(state, command):

@@ -62,8 +62,6 @@ def test_persisted_cooldown_blocks_dispatch_until_retry_time(tmp_path) -> None:
 
 
 def test_runtime_persists_new_failure_cooldown(tmp_path):
-    import pytest
-
     from orchestrator.executor import execute_claimed_task
     from orchestrator.scheduler import dispatch_task
 
@@ -78,9 +76,12 @@ def test_runtime_persists_new_failure_cooldown(tmp_path):
     task = dispatch_task({"id": "t", "status": "READY"}, [ProviderHealth("openai")])
     store.save("t", task)
     health = tmp_path / "health.json"
-    with pytest.raises(RuntimeError):
-        execute_claimed_task(store, task, lambda: [ProviderHealth("openai")], {"openai": Worker},
-                             audit_path=tmp_path / "audit", provider_health_path=health)
+    waiting = execute_claimed_task(store, task, lambda: [ProviderHealth("openai")],
+                                   {"openai": Worker}, audit_path=tmp_path / "audit",
+                                   provider_health_path=health)
+    assert waiting["status"] == "WAIT_PROVIDER"
+    assert waiting["attempt"] == 0
+    assert waiting["lease"] is None
     restored = load_provider_health(health)
     assert restored[0].state == ProviderState.RATE_LIMITED
     assert not restored[0].available()
