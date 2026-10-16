@@ -9,11 +9,12 @@ from typing import Any
 from uuid import uuid4
 
 from orchestrator.audit import AuditLog
-from orchestrator.provider_state import record_provider_error
+from orchestrator.provider_state import load_provider_health, record_provider_error
 from orchestrator.runtime import WorkerFactory, execute_with_failover
 from orchestrator.store import JsonTaskStore
 from providers.errors import normalize_sdk_error
 from providers.health import ProviderHealth
+from providers.subscription_limits import LIMIT_FAILURES, limit_delay
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +96,11 @@ def execute_claimed_task(
     result = None
     provider = None
     error = None
+    execution_providers = []
     try:
+        execution_providers = provider_source()
         provider, result = execute_with_failover(
-            handoff, provider_source(), factories,
+            handoff, execution_providers, factories,
             preferred=(running.get("owner") or {}).get("provider"),
             on_error=(lambda name, error: record_provider_error(provider_health_path, name, error))
             if provider_health_path is not None else None,
@@ -125,6 +128,23 @@ def execute_claimed_task(
             min(running["attempt"], 8) - 1)))
         updated["retry_at"] = (datetime.now(UTC) + timedelta(seconds=delay)).isoformat()
         updated["next_action"] = {"type": "retry" if retry else "human_intervention"}
+        if classified.retryable and classified.kind in LIMIT_FAILURES:
+            # Limits did not execute the objective and must not exhaust its
+            # bounded implementation/repair budget or the service failure budget.
+            updated["status"] = "WAIT_PROVIDER"
+            updated["attempt"] = int(task.get("attempt", 0))
+            checkpoint = dict(current.get("checkpoint") or {})
+            checkpoint["resume_phase"] = "READY"
+            updated["checkpoint"] = checkpoint
+            delay = classified.retry_after_seconds or limit_delay(classified.kind)
+            retry_at = datetime.now(UTC) + timedelta(seconds=delay)
+            if provider_health_path:
+                deadlines = [p.retry_at for p in load_provider_health(provider_health_path)
+                             if p.name in {live.name for live in execution_providers} and p.retry_at]
+                if deadlines:
+                    retry_at = min(deadlines)
+            updated["retry_at"] = retry_at.isoformat()
+            updated["next_action"] = {"type": "wait_for_subscription_reset"}
         event = "execution_interrupted"
     else:
         updated["status"] = "VALIDATING"
@@ -141,6 +161,6 @@ def execute_claimed_task(
     if not store.compare_and_save(current, updated):
         raise LeaseLost("Task changed before result could be saved")
     audit.append(event, task_id=task_id, provider=provider)
-    if error is not None:
+    if error is not None and updated["status"] != "WAIT_PROVIDER":
         raise error
     return updated

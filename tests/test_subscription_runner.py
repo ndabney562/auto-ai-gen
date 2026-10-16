@@ -60,7 +60,7 @@ def test_durable_pipeline_binds_independent_review_to_exact_commit(setup_task):
     assert advance_task(state, task_id, **kwargs) == task
 
 
-def test_failover_never_allows_implementer_to_review_itself(setup_task):
+def test_failover_never_allows_implementer_to_review_itself(setup_task, monkeypatch):
     _, state, task_id = setup_task
 
     class QuotaFailure:
@@ -76,7 +76,20 @@ def test_failover_never_allows_implementer_to_review_itself(setup_task):
                         health=[ProviderHealth("anthropic")])
     assert task["status"] == "WAIT_PROVIDER"
     assert task["checkpoint"]["resume_phase"] == "REVIEW"
-    # Recovery restores REVIEW; it cannot dispatch the available implementer.
+    # Stay paused until the durable cooldown expires, then restore REVIEW;
+    # the available implementer cannot review itself.
+    from datetime import datetime, timedelta
+
+    import orchestrator.subscription_runner as runner
+    from providers import health as provider_health
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromisoformat(task["retry_at"]).astimezone(tz) + timedelta(seconds=1)
+
+    monkeypatch.setattr(runner, "datetime", Clock)
+    monkeypatch.setattr(provider_health, "datetime", Clock)
     task = advance_task(state, task_id, factories=factories,
                         health=[ProviderHealth("anthropic")])
     assert task["status"] == "REVIEW"
@@ -306,3 +319,109 @@ def test_supervised_merge_is_reconciled_without_requesting_merge(setup_task):
     task = publish_task(state, task_id, "example/repo", publisher=Publisher())
     assert task["status"] == "DONE"
     assert task["checkpoint"]["merged_candidate_sha"] == task["checkpoint"]["candidate_sha"]
+
+
+def test_review_limit_wait_survives_restart_and_resumes_exact_candidate(setup_task, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    import orchestrator.subscription_runner as runner
+    from orchestrator import provider_state, supervisor
+    from providers import health as provider_health
+    from providers import subscription_limits
+    from providers.cli_provider import _claude_result
+
+    current = [datetime.now(UTC)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return current[0].astimezone(tz)
+
+    for module in (runner, provider_state, provider_health, subscription_limits):
+        monkeypatch.setattr(module, 'datetime', Clock)
+    _, state, task_id = setup_task
+    factories = {'openai': Implementer}
+    both = [ProviderHealth('openai'), ProviderHealth('anthropic')]
+    advance_task(state, task_id, factories=factories, health=both)
+    original = advance_task(state, task_id, factories=factories, health=both, validator=validated)
+    calls = []
+
+    class LimitThenReview:
+        def execute(self, handoff):
+            calls.append(1)
+            if len(calls) <= 5:
+                _claude_result(json.dumps({'subtype': 'error', 'is_error': True,
+                    'result': "You've hit your weekly limit; secret-diagnostic",
+                    'reset_at': (current[0] + timedelta(hours=6)).isoformat()}))
+            return Reviewer().execute(handoff)
+
+    factories = {'anthropic': LimitThenReview}
+    store = JsonTaskStore(state / 'tasks')
+    for count in range(1, 6):
+        waiting = advance_task(state, task_id, factories=factories, health=both)
+        assert waiting['status'] == 'WAIT_PROVIDER'
+        assert waiting['checkpoint']['review_attempt'] == 0
+        assert waiting['checkpoint']['candidate_sha'] == original['checkpoint']['candidate_sha']
+        assert waiting['validation'] == original['validation']
+        assert waiting['checkpoint']['resume_phase'] == 'REVIEW'
+        expiry = datetime.fromisoformat(waiting['retry_at'])
+        assert expiry > current[0] + timedelta(hours=6)
+        # A fresh store/driver represents process restart, with no hidden session.
+        assert JsonTaskStore(state / 'tasks').load(task_id) == waiting
+        current[0] = expiry - timedelta(seconds=1)
+        assert advance_task(state, task_id, factories=factories, health=both) == waiting
+        supervisor.configure(state, task_id, 'owner/repo', 'sha256:' + 'a' * 64)
+        config = supervisor.records(state).load('config')
+        supervisor.tick(state, config, lambda: False,
+                        phase=lambda *_: pytest.fail('must not launch before reset'))
+        assert len(calls) == count
+        assert supervisor.status(state)['retry_at'] == waiting['retry_at']
+        assert supervisor.status(state)['waiting_provider'] == 'anthropic'
+        assert 'secret-diagnostic' not in (state / 'provider-health.json').read_text()
+        assert 'secret-diagnostic' not in str(store.load(task_id))
+        current[0] = expiry + timedelta(seconds=1)
+        assert advance_task(state, task_id, factories=factories, health=both)['status'] == 'REVIEW'
+    reviewed = advance_task(state, task_id, factories=factories, health=both)
+    assert len(calls) == 6
+    assert reviewed['status'] == 'WAIT_CI'
+    assert reviewed['checkpoint']['review']['provider'] == 'anthropic'
+    assert reviewed['checkpoint']['review']['candidate_sha'] == original['checkpoint']['candidate_sha']
+    assert reviewed['checkpoint']['review_attempt'] == 1
+    assert reviewed['attempt'] == original['attempt']
+
+
+def test_nonlimit_review_errors_still_exhaust_budget(setup_task, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    import orchestrator.subscription_runner as runner
+    from orchestrator import provider_state
+    from providers import health as provider_health
+
+    current = [datetime.now(UTC)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return current[0].astimezone(tz)
+
+    for module in (runner, provider_state, provider_health):
+        monkeypatch.setattr(module, 'datetime', Clock)
+    _, state, task_id = setup_task
+    kwargs = {'factories': {'openai': Implementer}, 'health': [ProviderHealth('openai')],
+              'validator': validated}
+    advance_task(state, task_id, **kwargs)
+    advance_task(state, task_id, **kwargs)
+
+    class Outage:
+        def execute(self, handoff):
+            raise ProviderExecutionError('outage', ClassifiedProviderError(ProviderFailure.OUTAGE, True))
+
+    for count in range(1, 4):
+        task = advance_task(state, task_id, factories={'anthropic': Outage},
+                            health=[ProviderHealth('anthropic')])
+        assert task['checkpoint']['review_attempt'] == count
+        if count < 3:
+            assert task['status'] == 'WAIT_RETRY'
+            current[0] += timedelta(minutes=2)
+            assert advance_task(state, task_id)['status'] == 'REVIEW'
+    assert task['status'] == 'WAIT_HUMAN'

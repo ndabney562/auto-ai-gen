@@ -9,6 +9,7 @@ from pathlib import Path
 
 from providers.errors import ClassifiedProviderError, ProviderFailure
 from providers.health import ProviderHealth, ProviderState
+from providers.subscription_limits import LIMIT_FAILURES, limit_delay
 
 _FAILURE_TO_STATE = {
     ProviderFailure.RATE_LIMITED: ProviderState.RATE_LIMITED,
@@ -29,7 +30,8 @@ def health_after_error(
     state = _FAILURE_TO_STATE.get(error.kind, ProviderState.OUTAGE)
     retry_at = None
     if error.retryable:
-        delay = error.retry_after_seconds or default_retry_seconds
+        fallback = limit_delay(error.kind) if error.kind in LIMIT_FAILURES else default_retry_seconds
+        delay = error.retry_after_seconds or fallback
         retry_at = now + timedelta(seconds=delay)
     return ProviderHealth(name=name, state=state, retry_at=retry_at, last_error=error.detail)
 

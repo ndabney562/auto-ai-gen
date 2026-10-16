@@ -75,3 +75,32 @@ automatically. Tests exercise process death, immediate stopped-service cancellat
 deferred cancellation after phase cleanup, terminal-record preservation, unexpected
 errors, and checkpoint preservation; a full physical Mac reboot and unattended
 subscription task remain deployment acceptance checks.
+
+## Subscription limits and automatic resumption
+
+A Codex or Claude rate/subscription limit now enters WAIT_PROVIDER instead of
+exhausting implementation, review, or supervisor failure budgets. The durable
+record retains the exact candidate, validation, review phase, and UTC `retry_at`.
+`status` shows that deadline and the waiting reviewer. Restarting the service does
+not clear the cooldown. At the deadline the supervisor resumes the saved phase;
+it never uses the implementation provider to approve its own candidate.
+
+The CLI adapter recognizes explicit reset timestamps (offset ISO, Unix seconds or
+milliseconds), retry-after seconds, and timezone-qualified notices such as
+`resets Fri at 5am (America/New_York)`. A 30-second buffer avoids racing the reset;
+probes are at least 60 seconds apart. Time-only notices mean the next occurrence
+in the named timezone, not a guaranteed weekly reset date. If still limited, the
+next response schedules another wait. DST and timezone offsets are handled
+without relying on the Mac's timezone.
+
+When no trustworthy reset hint is available, quota waits probe hourly and rate
+limits every five minutes. Raw CLI diagnostics, tokens, and prompt text are not
+saved with cooldowns. Authentication/configuration errors still stop for repair;
+outages, invalid reviews, and interrupted requests retain their bounded budgets.
+No API-key fallback, purchased credits, or review bypass is used.
+
+The opt-in `tests.acceptance.local_limit_recovery` trial uses local CLI fixtures,
+real subprocesses, real offline Docker validation, and a real cooldown. It kills
+and restarts a waiting service, verifies no early requests, and observes automatic
+review resumption for the same candidate. Publication is explicitly disabled in
+that fixture; its approval is not a real model review or merge credential.

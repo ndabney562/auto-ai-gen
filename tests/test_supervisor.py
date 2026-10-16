@@ -315,3 +315,17 @@ def test_service_death_stops_active_phase(tmp_path, sig):
 def test_status_does_not_expose_task_content(tmp_path):
     setup(tmp_path)
     assert 'completed_work' not in json.dumps(s.status(tmp_path))
+
+
+def test_subscription_wait_can_be_cancelled_before_reset(tmp_path):
+    config = setup(tmp_path, 'WAIT_PROVIDER')
+    store = JsonTaskStore(tmp_path / 'tasks')
+    task = store.load('task')
+    task['retry_at'] = '2999-01-01T00:00:00+00:00'
+    store.save('task', task)
+    with s.service_lock(tmp_path):
+        s.request(tmp_path, 'cancel')
+        assert store.load('task')['status'] == 'WAIT_PROVIDER'
+        s.tick(tmp_path, config, lambda: False,
+               phase=lambda *_: pytest.fail('cancelled wait must not request a model'))
+    assert store.load('task')['status'] == 'CANCELLED'
