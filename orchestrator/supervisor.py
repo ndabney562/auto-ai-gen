@@ -26,6 +26,10 @@ PAUSED = {"WAIT_HUMAN", "BLOCKED", "DONE", "CANCELLED", "FAILED_PERMANENT"}
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
+class ServiceAlreadyRunning(RuntimeError):
+    """The nonblocking lifetime service lock is busy."""
+
+
 def records(state):
     return JsonTaskStore(state / "supervisor")
 
@@ -53,7 +57,7 @@ def service_lock(state):
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise RuntimeError("Supervisor is already running") from exc
+            raise ServiceAlreadyRunning("Supervisor is already running") from exc
         yield
 
 
@@ -61,7 +65,7 @@ def running(state):
     try:
         with service_lock(state):
             return False
-    except RuntimeError:
+    except ServiceAlreadyRunning:
         return True
 
 
@@ -77,12 +81,25 @@ def status(state):
 
 def request(state, command):
     records(state)
-    (state / "supervisor" / command).touch(mode=0o600)
+    marker = state / "supervisor" / command
+    marker.touch(mode=0o600)
+    if command != "cancel":
+        return
+    try:
+        with service_lock(state):
+            # Holding the lifetime lock excludes a service and its active phase.
+            # Publish the marker first so a busy service can reap its own phase.
+            config = records(state).load("config")
+            cancel_task(state, config["task_id"])
+            marker.unlink(missing_ok=True)
+    except ServiceAlreadyRunning:
+        # The running service consumes the marker only after phase cleanup.
+        return
 
 
 def cancel_task(state, task_id):
-    # Caller has reaped the active phase first, so no publishing side effect can
-    # start after this checkpoint. A prior push/merge may already have happened.
+    # Caller holds the lifetime lock with no active phase, or has reaped the
+    # active phase first. A prior push/merge may already have happened.
     store = JsonTaskStore(state / "tasks")
     task = store.load(task_id)
     if task["status"] in {"DONE", "CANCELLED", "FAILED_PERMANENT"}:
