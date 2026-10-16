@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -53,7 +54,35 @@ def main():
     supervisor.configure(state, task_id, 'ndabney562/auto-ai-gen', args.image, interval=5)
     try:
         supervisor.start(state)
+        registry = Path(task['checkpoint']['workspace']) / '.git' / 'agent-validation'
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                resource = JsonTaskStore(registry).load('active')
+                inspected = subprocess.run(['docker', 'inspect', resource['name'],
+                                            '--format', '{{.State.Running}}'],
+                                           capture_output=True, text=True, timeout=10)
+                if inspected.returncode == 0 and inspected.stdout.strip() == 'true':
+                    break
+            except FileNotFoundError:
+                pass
+            time.sleep(.1)
+        else:
+            raise TimeoutError('No active validation container observed')
+        interrupted_sha = store.load(task_id)['checkpoint']['candidate_sha']
+        supervisor.request(state, 'stop')
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            inspected = subprocess.run(['docker', 'inspect', resource['name']],
+                                       capture_output=True, timeout=10)
+            if not supervisor.running(state) and inspected.returncode != 0:
+                break
+            time.sleep(.1)
+        else:
+            raise TimeoutError('Interrupted validation did not clean up')
+        supervisor.start(state)
         wait_for(state, lambda s: s['task_status'] == 'WAIT_PROVIDER')
+        assert store.load(task_id)['checkpoint']['candidate_sha'] == interrupted_sha
         validated = store.load(task_id)
         assert validated['validation']['passed'] is True
         sha = validated['checkpoint']['candidate_sha']
@@ -69,7 +98,7 @@ def main():
         wait_for(state, lambda s: s['task_status'] == 'CANCELLED')
         evidence = {'task_id': task_id, 'candidate_sha': sha,
                     'validation': validated['validation'], 'restart_preserved_candidate': True,
-                    'cancelled': True, 'model_requests': 0}
+                    'cancelled': True, 'active_validation_interrupted': True, 'model_requests': 0}
         (state / 'evidence.json').write_text(json.dumps(evidence, indent=2))
         print(json.dumps(evidence))
     finally:
