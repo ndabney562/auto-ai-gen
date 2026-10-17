@@ -191,3 +191,45 @@ def test_enqueue_during_service_phase_is_not_lost(tmp_path):
         release.set()
         run.result(timeout=5)
     assert [j['task_id'] for j in q.summary(tmp_path)['tasks']] == ['a', 'b']
+
+
+@pytest.mark.parametrize('names', [(), ('unenrolled',)])
+def test_summary_status_counts_empty_queue(tmp_path, names):
+    setup(tmp_path, names)
+    result = q.summary(tmp_path)
+    assert result == {'active_task': None, 'tasks': [], 'status_counts': {}}
+    assert sum(result['status_counts'].values()) == len(result['tasks']) == 0
+
+
+def test_summary_status_counts_mixed_enrolled_statuses(tmp_path):
+    statuses = {'a': 'READY', 'b': 'DONE', 'c': 'READY',
+                'd': 'WAIT_PROVIDER', 'e': 'DONE', 'unenrolled': 'BLOCKED',
+                'also-unenrolled': 'READY'}
+    setup(tmp_path, statuses)
+    store = JsonTaskStore(tmp_path / 'tasks')
+    for task_id, status in statuses.items():
+        task = store.load(task_id)
+        task['status'] = status
+        store.save(task_id, task)
+    enrolled = ['c', 'b', 'a', 'e', 'd']
+    for task_id in enrolled:
+        q.enqueue(tmp_path, task_id)
+    result = q.summary(tmp_path)
+    assert [row['task_id'] for row in result['tasks']] == enrolled
+    assert [row['status'] for row in result['tasks']] == [statuses[t] for t in enrolled]
+    assert result['status_counts'] == {'READY': 2, 'DONE': 2, 'WAIT_PROVIDER': 1}
+    assert sum(result['status_counts'].values()) == len(result['tasks']) == len(enrolled)
+
+
+def test_summary_status_counts_include_missing_enrolled_records(tmp_path, monkeypatch):
+    setup(tmp_path)
+    for task_id in ('b', 'a', 'c'):
+        q.enqueue(tmp_path, task_id)
+    store = JsonTaskStore(tmp_path / 'tasks')
+    remaining = store.load('a')
+    monkeypatch.setattr(JsonTaskStore, 'list_tasks', lambda self: [remaining])
+    result = q.summary(tmp_path)
+    assert [row['task_id'] for row in result['tasks']] == ['b', 'a', 'c']
+    assert [row['status'] for row in result['tasks']] == ['MISSING', 'READY', 'MISSING']
+    assert result['status_counts'] == {'MISSING': 2, 'READY': 1}
+    assert sum(result['status_counts'].values()) == len(result['tasks']) == 3

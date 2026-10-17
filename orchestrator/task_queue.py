@@ -93,13 +93,17 @@ def summary(state):
     tasks = {t['id']: t for t in JsonTaskStore(state / 'tasks').list_tasks()}
     with locked_queue(state) as queue:
         rows = []
+        status_counts = {}
         for job in queue['jobs']:
             task = tasks.get(job['task_id'], {})
-            rows.append({'task_id': job['task_id'], 'status': task.get('status', 'MISSING'),
+            status = task.get('status', 'MISSING')
+            status_counts[status] = status_counts.get(status, 0) + 1
+            rows.append({'task_id': job['task_id'], 'status': status,
                 'dependencies': job['dependencies'],
                 'blocked_dependencies': [dep for dep in job['dependencies']
                                          if tasks.get(dep, {}).get('status') != 'DONE'],
                 'retry_at': task.get('retry_at'),
                 'next_action': task.get('next_action', {}).get('type'),
                 'supervisor': health(state, job['task_id'])})
-        return {'active_task': queue['active_task'], 'tasks': rows}
+        return {'active_task': queue['active_task'], 'tasks': rows,
+                'status_counts': status_counts}
