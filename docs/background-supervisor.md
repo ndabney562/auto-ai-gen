@@ -105,3 +105,30 @@ real subprocesses, real offline Docker validation, and a real cooldown. It kills
 and restarts a waiting service, verifies no early requests, and observes automatic
 review resumption for the same candidate. Publication is explicitly disabled in
 that fixture; its approval is not a real model review or merge credential.
+
+## Interruption diagnostics
+
+`status` includes `last_phase` and, after a failure, `last_phase_failure`. These
+fixed-size records live in `STATE/supervisor/last-phase.json` and
+`last-phase-failure.json`; a successful retry does not erase the previous failure.
+Each phase saves its start before launch. If the process dies before recording an
+exit, the next phase retains that start as `interrupted_before_recording_exit`.
+A `running` record alone is not proof that its process is still alive.
+
+Records include the generated task ID, exit code, outcome (success, nonzero exit,
+timeout, stopped, launch error or coordinator error), start/end timestamps, wall
+and monotonic durations, stderr byte count, and whether stderr collection finished.
+Only recognized exception types and up to eight trusted module file/line locations
+are retained. Raw stderr, exception messages, commands, prompts, credentials and
+candidate source are not saved. Long stderr lines are discarded and stderr is
+drained continuously with bounded memory. Missing metadata does not prove that no
+error occurred. A clock gap is evidence to investigate, not proof of Mac sleep.
+
+Recovery tests suspend a real worker process past its renewable lease and kill a
+separate worker process. Stale work is rejected, checkpoints and attempt counts
+survive, and resumed work must still enter validation rather than DONE. These
+process tests do not certify physical host sleep, lid-close behavior or a Mac
+reboot. An automatic physical sleep/wake test needs permission to schedule wake
+with macOS power management; do not sleep a remote execution host without a
+verified automatic wake plan. No retry budgets or independent-review gates are
+relaxed by diagnostics.
