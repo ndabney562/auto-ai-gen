@@ -49,12 +49,6 @@ def test_expired_execution_recovers_without_accepting_stale_work(tmp_path, inter
         assert (tmp_path / 'entered').exists()
         os.kill(child.pid, signal.SIGSTOP if interruption == 'suspend' else signal.SIGKILL)
         time.sleep(.6)  # exceeds the actual persisted lease while renewal cannot run
-        if interruption == 'suspend':
-            (tmp_path / 'release').touch()
-            os.kill(child.pid, signal.SIGCONT)
-        child.wait(timeout=5)
-        if interruption == 'suspend':
-            assert (tmp_path / 'lease-lost').exists()
         expired = store.load('task')
         assert expired['status'] == 'EXECUTING'
         assert expired['attempt'] == 1
@@ -80,9 +74,56 @@ def test_expired_execution_recovers_without_accepting_stale_work(tmp_path, inter
         assert result['attempt'] == 2
         assert result['result'] == 'fresh proposal requiring validation'
         assert result['checkpoint']['completed_work'] == ['retained']
+        if interruption == 'suspend':
+            (tmp_path / 'release').touch()
+            os.kill(child.pid, signal.SIGCONT)
+        child.wait(timeout=5)
+        if interruption == 'suspend':
+            assert (tmp_path / 'lease-lost').exists()
+        assert store.load('task') == result
         events = [json.loads(line)['event'] for line in (tmp_path / 'audit.jsonl').read_text().splitlines()]
         assert events.count('execution_awaiting_validation') == 1
     finally:
         if child.poll() is None:
             child.kill()
             child.wait(timeout=5)
+
+
+def test_recovery_does_not_reclaim_live_lease(tmp_path):
+    from datetime import UTC, datetime, timedelta
+    task = {'id': 'task', 'status': 'EXECUTING', 'attempt': 1,
+            'lease': {'token': 'original', 'expires_at':
+                      (datetime.now(UTC) + timedelta(minutes=10)).isoformat()},
+            'checkpoint': {'completed_work': ['retained']}}
+    assert recover_after_restart(task) == task
+
+
+def test_wall_clock_expiry_rejects_result_with_frozen_monotonic(tmp_path, monkeypatch):
+    import time
+    from datetime import UTC, datetime, timedelta
+
+    from orchestrator import executor
+    class Clock(datetime):
+        offset = timedelta(0)
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + cls.offset
+    store = JsonTaskStore(tmp_path / 'tasks')
+    task = {'id': 'task', 'status': 'CLAIMED', 'attempt': 0, 'max_attempts': 3,
+            'checkpoint': {'completed_work': ['retained']}, 'owner': {'provider': 'fixture'}}
+    store.save('task', task)
+    frozen = time.monotonic()
+    class Worker:
+        def execute(self, handoff):
+            Clock.offset = timedelta(hours=1)
+            return WorkerResult('stale')
+    with monkeypatch.context() as patch:
+        patch.setattr(executor, 'datetime', Clock)
+        patch.setattr(time, 'monotonic', lambda: frozen)
+        with pytest.raises(executor.LeaseLost):
+            execute_claimed_task(store, task, lambda: [ProviderHealth('fixture')],
+                {'fixture': Worker}, audit_path=tmp_path / 'audit.jsonl')
+    current = store.load('task')
+    assert current['status'] == 'EXECUTING'
+    assert 'result' not in current
+    assert recover_after_restart(current, now=datetime.now(UTC) + timedelta(hours=1))['status'] == 'READY'

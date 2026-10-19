@@ -116,16 +116,20 @@ exit, the next phase retains that start as `interrupted_before_recording_exit`.
 A `running` record alone is not proof that its process is still alive.
 
 Records include the generated task ID, exit code, outcome (success, nonzero exit,
-timeout, stopped, launch error or coordinator error), start/end timestamps, wall
+timeout, stopped, launch error or coordinator error), start/end timestamps, signed wall
 and monotonic durations, stderr byte count, and whether stderr collection finished.
 Only recognized exception types and up to eight trusted module file/line locations
 are retained. Raw stderr, exception messages, commands, prompts, credentials and
 candidate source are not saved. Long stderr lines are discarded and stderr is
-drained continuously with bounded memory. Missing metadata does not prove that no
+drained without reader threads, with bounded memory and bounded work per poll.
+The read pipe always closes, including when a detached descendant retains its
+write end; incomplete collection is reported. Malformed diagnostic records and
+diagnostic write failures do not block task processing. Missing metadata does not prove that no
 error occurred. A clock gap is evidence to investigate, not proof of Mac sleep.
 
 Recovery tests suspend a real worker process past its renewable lease and kill a
-separate worker process. Stale work is rejected, checkpoints and attempt counts
+separate worker process. Tests resume the stale worker after a replacement owner
+has completed its proposal, and advance wall time with monotonic time frozen. Stale work is rejected, checkpoints and attempt counts
 survive, and resumed work must still enter validation rather than DONE. These
 process tests do not certify physical host sleep, lid-close behavior or a Mac
 reboot. An automatic physical sleep/wake test needs permission to schedule wake

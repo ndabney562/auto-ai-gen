@@ -18,10 +18,10 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Thread
 
 from orchestrator import task_queue
 from orchestrator.github_publish import GitHubPublisher
+from orchestrator.phase_diagnostics import EXCEPTIONS, load_diagnostic, save_diagnostic
 from orchestrator.store import JsonTaskStore
 
 PAUSED = {"WAIT_HUMAN", "BLOCKED", "DONE", "CANCELLED", "FAILED_PERMANENT"}
@@ -78,10 +78,9 @@ def status(state):
     config = store.load("config")
     diagnostics = {}
     for name in ("last-phase", "last-phase-failure"):
-        try:
-            diagnostics[name.replace("-", "_")] = store.load(name)
-        except FileNotFoundError:
-            pass
+        value = load_diagnostic(store, name)
+        if value is not None:
+            diagnostics[name.replace("-", "_")] = value
     if config.get("mode") == "queue":
         return {**diagnostics, "running": running(state), "mode": "queue", "merge_enabled": config["merge"],
                 **task_queue.summary(state)}
@@ -176,70 +175,83 @@ def run_phase(state, command, stopping, *, timeout=1200):
                {"step", "publish"} and re.fullmatch(r"[0-9a-f]{32}", command[6]) else None)
     record = {"id": "last-phase", "task_id": task_id,
               "started_at": started.isoformat(), "outcome": "running"}
-    try:
-        previous = store.load("last-phase")
-        if previous["outcome"] == "running":
-            store.save("last-phase-failure", dict(previous, id="last-phase-failure",
-                       outcome="interrupted_before_recording_exit"))
-    except FileNotFoundError:
-        pass
-    store.save("last-phase", record)
+    previous = load_diagnostic(store, "last-phase")
+    if previous and previous["outcome"] == "running":
+        save_diagnostic(store, "last-phase-failure", dict(previous, id="last-phase-failure",
+                        outcome="interrupted_before_recording_exit"))
+    save_diagnostic(store, "last-phase", record)
+    # Guards clean up nested CLI/Docker sessions when their coordinator disappears.
     guard = Path(__file__).parents[1] / "providers" / "_cli_guard.py"
     child = None
-    reader = None
+    complete = False
     result, outcome = None, "launch_error"
+    cleanup_error = None
 
     def drain():
-        while chunk := child.stderr.read(4096):
+        nonlocal complete
+        # Bound work per iteration so an endless writer cannot starve cancellation.
+        for _ in range(16):
+            try:
+                chunk = os.read(child.stderr.fileno(), 4096)
+            except BlockingIOError:
+                return
+            if not chunk:
+                complete = True
+                return
             metadata.feed(chunk)
 
     try:
         child = subprocess.Popen([sys.executable, str(guard), str(os.getpid()), "[]", *command],
             cwd=Path(__file__).parents[1], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, start_new_session=True)
-        reader = Thread(target=drain, daemon=True)
-        reader.start()
+        os.set_blocking(child.stderr.fileno(), False)
         outcome = "coordinator_error"
         deadline = clock + timeout
-        while child.poll() is None:
+        while True:
+            drain()
+            result = child.poll()
+            if result is not None:
+                outcome = "success" if result == 0 else "nonzero_exit"
+                return result
             if stopping() or (state / "supervisor" / "cancel").exists():
                 outcome = "stopped"
                 return None
             if time.monotonic() >= deadline:
                 result, outcome = 124, "timeout"
                 return result
-            time.sleep(0.1)
-        result = child.returncode
-        outcome = "success" if result == 0 else "nonzero_exit"
-        return result
-    except OSError as exc:
-        # Error messages may contain credentials or paths. Persist the type only.
-        metadata.line(type(exc).__name__)
+            time.sleep(0.01)
+    except Exception as exc:
+        kind = type(exc).__name__
+        metadata.exception_type = kind if kind in EXCEPTIONS else None
         raise
     finally:
         if child is not None:
-            terminate(child)
-            # A surviving descendant can retain stderr after its parent exits.
-            # Kill only this private phase group before waiting for EOF.
             try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if reader is not None:
-            reader.join(timeout=5)
-        complete = reader is None or not reader.is_alive()
-        if child is not None and complete:
-            child.stderr.close()
+                # terminate signals only a still-live, unreaped leader's group.
+                # Never signal a numeric group after poll/wait has reaped its leader.
+                terminate(child)
+            except OSError as exc:
+                cleanup_error = type(exc).__name__
+            except subprocess.TimeoutExpired:
+                cleanup_error = "TimeoutExpired"
+            try:
+                until = time.monotonic() + .2
+                while not complete and time.monotonic() < until:
+                    drain()
+                    if not complete:
+                        time.sleep(.01)
+            except OSError as exc:
+                cleanup_error = type(exc).__name__
+            finally:
+                child.stderr.close()
         ended = datetime.now(UTC)
         record.update(outcome=outcome, exit_code=result, ended_at=ended.isoformat(),
-                      wall_elapsed_seconds=max(0, (ended - started).total_seconds()),
+                      wall_elapsed_seconds=(ended - started).total_seconds(),
                       monotonic_elapsed_seconds=max(0, time.monotonic() - clock),
-                      stderr_complete=complete, **(metadata.finish() if complete else
-                          {"exception_type": None, "frames": [],
-                           "stderr_bytes": metadata.bytes_seen}))
-        store.save("last-phase", record)
-        if outcome != "success":
-            store.save("last-phase-failure", dict(record, id="last-phase-failure"))
+                      stderr_complete=complete, cleanup_error=cleanup_error, **metadata.finish())
+        save_diagnostic(store, "last-phase", record)
+        if outcome != "success" or cleanup_error:
+            save_diagnostic(store, "last-phase-failure", dict(record, id="last-phase-failure"))
 
 
 def tick(state, config, stopping, *, phase=run_phase, now=time.time):

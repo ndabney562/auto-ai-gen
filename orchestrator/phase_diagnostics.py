@@ -1,6 +1,7 @@
 """Bounded phase diagnostics; raw subprocess output is never persisted."""
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
@@ -24,38 +25,62 @@ class TraceMetadata:
         self.pending = b''
         self.discarding = False
         self.bytes_seen = 0
+        self.in_traceback = False
 
     def feed(self, chunk):
         self.bytes_seen += len(chunk)
-        for part in chunk.splitlines(keepends=True):
-            complete = part.endswith(b'\n')
+        parts = chunk.split(b'\n')
+        for index, part in enumerate(parts):
             if not self.discarding:
                 self.pending += part
                 if len(self.pending) > 1024:
                     self.pending = b''
                     self.discarding = True
-            if complete:
+            if index < len(parts) - 1:
                 if not self.discarding:
-                    self.line(self.pending.decode('utf-8', errors='replace').rstrip('\r\n'))
+                    self.line(self.pending.decode('utf-8', errors='replace').rstrip('\r'))
                 self.pending = b''
                 self.discarding = False
 
     def line(self, line):
-        kind = line.split(':', 1)[0]
-        if kind in EXCEPTIONS:
-            self.exception_type = kind
+        if line == 'Traceback (most recent call last):':
+            self.frames = []
+            self.exception_type = None
+            self.in_traceback = True
+            return
+        if not self.in_traceback:
+            return
         match = FRAME.fullmatch(line)
         if match:
             file, number, _function = match.groups()
-            # Only real, trusted module files; arbitrary stderr paths are not records.
-            path = Path(file)
-            if (path.is_absolute() and path.parent in {ROOT / 'orchestrator', ROOT / 'providers'}
+            path = Path(file).resolve()
+            if (path.parent in {ROOT / 'orchestrator', ROOT / 'providers'}
                     and path.is_file() and path.suffix == '.py'):
                 self.frames = [*self.frames[-7:], {'file': str(path.relative_to(ROOT)),
                     'line': int(number)}]
+        elif line and not line[0].isspace():
+            kind = line.split(':', 1)[0].rsplit('.', 1)[-1]
+            if kind in EXCEPTIONS:
+                self.exception_type = kind
+            self.in_traceback = False
 
     def finish(self):
         if self.pending and not self.discarding:
             self.line(self.pending.decode('utf-8', errors='replace'))
         return {'exception_type': self.exception_type, 'frames': self.frames,
                 'stderr_bytes': self.bytes_seen}
+
+
+def load_diagnostic(store, name):
+    try:
+        value = store.load(name)
+        return value if isinstance(value, dict) and isinstance(value.get('outcome'), str) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def save_diagnostic(store, name, value):
+    try:
+        store.save(name, value)
+    except (OSError, ValueError, TypeError):
+        logging.getLogger(__name__).warning('Phase diagnostic could not be saved')
