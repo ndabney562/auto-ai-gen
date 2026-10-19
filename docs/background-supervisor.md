@@ -118,8 +118,14 @@ A `running` record alone is not proof that its process is still alive.
 Records include the generated task ID, exit code, outcome (success, nonzero exit,
 timeout, stopped, launch error or coordinator error), start/end timestamps, signed wall
 and monotonic durations, stderr byte count, and whether stderr collection finished.
+The additive `operation` field is `step`, `publish`, or null. It and the task ID
+are inferred only from the trusted interpreter/module command structure with
+`--state`, the expected state argument, and a 32-character lowercase hexadecimal
+task ID. Unrelated or malformed commands receive null metadata. Older records
+may omit `operation`; treat absence as null. Interrupted records retain their
+original operation, or null when absent.
 Only recognized exception types and up to eight trusted module file/line locations
-are retained. Raw stderr, exception messages, commands, prompts, credentials and
+are retained. Raw stderr, exception messages, commands, argv, prompts, credentials and
 candidate source are not saved. Long stderr lines are discarded and stderr is
 drained without reader threads, with bounded memory and bounded work per poll.
 The read pipe always closes, including when a detached descendant retains its
