@@ -111,3 +111,11 @@ and additional repository context gathering remain future work.
 Official interfaces: [Codex noninteractive mode](https://learn.chatgpt.com/docs/non-interactive-mode),
 [Claude programmatic execution](https://code.claude.com/docs/en/headless),
 [Claude CLI reference](https://code.claude.com/docs/en/cli-reference).
+
+Review responses may be a JSON object or a single complete `json`/unlabelled
+Markdown code fence containing that object. Extra prose, multiple blocks and
+non-object responses are rejected. This envelope handling does not relax explicit
+boolean approval, exact candidate SHA, independent-provider or validation gates.
+Malformed responses consume the bounded review-attempt budget and stop at
+`inspect_review_response`; they do not mark provider authentication or availability
+as failed. Raw reviewer text is not stored in the failure checkpoint.

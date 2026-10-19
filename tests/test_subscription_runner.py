@@ -425,3 +425,91 @@ def test_nonlimit_review_errors_still_exhaust_budget(setup_task, monkeypatch):
             current[0] += timedelta(minutes=2)
             assert advance_task(state, task_id)['status'] == 'REVIEW'
     assert task['status'] == 'WAIT_HUMAN'
+
+
+@pytest.mark.parametrize('wrapper', ['plain', 'json-fence', 'bare-fence', 'crlf-fence'])
+def test_fenced_independent_review_keeps_exact_sha_gate(setup_task, wrapper):
+    _, state, task_id = setup_task
+    class FencedReviewer(Reviewer):
+        def execute(self, handoff):
+            result = super().execute(handoff)
+            text = result.output
+            if wrapper != 'plain':
+                newline = '\r\n' if wrapper == 'crlf-fence' else '\n'
+                label = '' if wrapper == 'bare-fence' else 'json'
+                text = '```' + label + newline + text + newline + '```'
+            return WorkerResult(text, session_id='independent-review')
+    kwargs = {'factories': {'openai': Implementer, 'anthropic': FencedReviewer},
+              'health': [ProviderHealth('openai'), ProviderHealth('anthropic')],
+              'validator': validated}
+    advance_task(state, task_id, **kwargs)
+    advance_task(state, task_id, **kwargs)
+    result = advance_task(state, task_id, **kwargs)
+    assert result['status'] == 'WAIT_CI'
+    assert result['checkpoint']['review']['provider'] == 'anthropic'
+    assert result['checkpoint']['review']['candidate_sha'] == result['validation']['candidate_sha']
+    assert not (state / 'provider-health.json').exists()
+
+
+@pytest.mark.parametrize('text', [
+    'prose\n```json\n{}\n```', '```json\n{}\n```\nprose',
+    '```json\n{}\n```\n```json\n{}\n```', '```python\n{}\n```',
+    '```json\n{}', '[]', 'null', '{broken', None])
+def test_review_parser_does_not_extract_prose_or_nonobjects(text):
+    from orchestrator.subscription_runner import InvalidReviewResponse, parse_review_response
+    with pytest.raises(InvalidReviewResponse):
+        parse_review_response(text)
+
+
+def test_invalid_review_format_exhausts_without_fake_provider_outage(setup_task):
+    _, state, task_id = setup_task
+    store = JsonTaskStore(state / 'tasks')
+    class BrokenReviewer:
+        def execute(self, handoff):
+            return WorkerResult('private-invalid-prose')
+    kwargs = {'factories': {'openai': Implementer, 'anthropic': BrokenReviewer},
+              'health': [ProviderHealth('openai'), ProviderHealth('anthropic')],
+              'validator': validated}
+    advance_task(state, task_id, **kwargs)
+    advance_task(state, task_id, **kwargs)
+    for count in range(1, 4):
+        result = advance_task(state, task_id, **kwargs)
+        assert result['checkpoint']['review_attempt'] == count
+        assert result['checkpoint']['review_error'] == {'kind': 'invalid_review_response'}
+        if count < 3:
+            assert result['status'] == 'WAIT_RETRY'
+            result.pop('retry_at')
+            store.save(task_id, result)
+            assert advance_task(state, task_id, **kwargs)['status'] == 'REVIEW'
+    assert result['status'] == 'WAIT_HUMAN'
+    assert result['next_action']['type'] == 'inspect_review_response'
+    assert 'private-invalid-prose' not in json.dumps(result)
+    assert not (state / 'provider-health.json').exists()
+
+
+@pytest.mark.parametrize('approved,sha', [(True, 'wrong-sha'), ('true', None), (False, None)])
+def test_fenced_review_never_weakens_approval_or_sha(setup_task, approved, sha):
+    _, state, task_id = setup_task
+    class BadApproval(Reviewer):
+        def execute(self, handoff):
+            result = json.loads(super().execute(handoff).output)
+            result.update(approved=approved, candidate_sha=sha or result['candidate_sha'])
+            return WorkerResult('```json\n' + json.dumps(result) + '\n```')
+    kwargs = {'factories': {'openai': Implementer, 'anthropic': BadApproval},
+              'health': [ProviderHealth('openai'), ProviderHealth('anthropic')], 'validator': validated}
+    advance_task(state, task_id, **kwargs)
+    advance_task(state, task_id, **kwargs)
+    assert advance_task(state, task_id, **kwargs)['status'] == 'REPAIR'
+
+
+def test_fenced_review_preserves_unicode_separator_inside_json_string():
+    from orchestrator.subscription_runner import parse_review_response
+    payload = {'approved': True, 'candidate_sha': 'exact', 'reason': 'first\u2028second'}
+    text = '```json\n' + json.dumps(payload, ensure_ascii=False) + '\n```'
+    assert parse_review_response(text) == payload
+
+
+def test_review_rejects_duplicate_approval_keys():
+    from orchestrator.subscription_runner import InvalidReviewResponse, parse_review_response
+    with pytest.raises(InvalidReviewResponse):
+        parse_review_response('```json\n{"approved":false,"approved":true}\n```')
