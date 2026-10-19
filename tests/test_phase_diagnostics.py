@@ -196,3 +196,12 @@ def test_cleanup_signal_failure_does_not_hide_timeout(tmp_path, monkeypatch):
             if child.poll() is None:
                 original_signal(child.pid, signal.SIGKILL)
                 child.wait(timeout=5)
+
+
+def test_invalid_traceback_path_does_not_interrupt_phase():
+    trace = TraceMetadata()
+    trace.feed(b'Traceback (most recent call last):\n')
+    trace.feed(b'  File "/invalid\x00path.py", line 5, in ignored\n')
+    trace.feed(b'ValueError: private\n')
+    assert trace.finish()['exception_type'] == 'ValueError'
+    assert trace.finish()['frames'] == []

@@ -53,7 +53,10 @@ class TraceMetadata:
         match = FRAME.fullmatch(line)
         if match:
             file, number, _function = match.groups()
-            path = Path(file).resolve()
+            try:
+                path = Path(file).resolve()
+            except (OSError, RuntimeError, ValueError):
+                return
             if (path.parent in {ROOT / 'orchestrator', ROOT / 'providers'}
                     and path.is_file() and path.suffix == '.py'):
                 self.frames = [*self.frames[-7:], {'file': str(path.relative_to(ROOT)),

@@ -243,7 +243,10 @@ def run_phase(state, command, stopping, *, timeout=1200):
             except OSError as exc:
                 cleanup_error = type(exc).__name__
             finally:
-                child.stderr.close()
+                try:
+                    child.stderr.close()
+                except OSError as exc:
+                    cleanup_error = type(exc).__name__
         ended = datetime.now(UTC)
         record.update(outcome=outcome, exit_code=result, ended_at=ended.isoformat(),
                       wall_elapsed_seconds=(ended - started).total_seconds(),
