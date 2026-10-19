@@ -21,6 +21,7 @@ from pathlib import Path
 
 from orchestrator import task_queue
 from orchestrator.github_publish import GitHubPublisher
+from orchestrator.phase_diagnostics import EXCEPTIONS, load_diagnostic, save_diagnostic
 from orchestrator.store import JsonTaskStore
 
 PAUSED = {"WAIT_HUMAN", "BLOCKED", "DONE", "CANCELLED", "FAILED_PERMANENT"}
@@ -75,12 +76,17 @@ def running(state):
 def status(state):
     store = records(state)
     config = store.load("config")
+    diagnostics = {}
+    for name in ("last-phase", "last-phase-failure"):
+        value = load_diagnostic(store, name)
+        if value is not None:
+            diagnostics[name.replace("-", "_")] = value
     if config.get("mode") == "queue":
-        return {"running": running(state), "mode": "queue", "merge_enabled": config["merge"],
+        return {**diagnostics, "running": running(state), "mode": "queue", "merge_enabled": config["merge"],
                 **task_queue.summary(state)}
     task = JsonTaskStore(state / "tasks").load(config["task_id"])
     health = store.load("health")
-    return {"running": running(state), "task_id": task["id"], "task_status": task["status"],
+    return {**diagnostics, "running": running(state), "task_id": task["id"], "task_status": task["status"],
             "next_action": task.get("next_action", {}).get("type"),
             "merge_enabled": config["merge"], "retry_at": task.get("retry_at"),
             "waiting_provider": task.get("next_action", {}).get("provider"),
@@ -158,23 +164,97 @@ def terminate(child):
 
 
 def run_phase(state, command, stopping, *, timeout=1200):
-    # Guard owns a private group and stops the whole phase if the service dies.
-    # Nested CLI/Docker guards see their coordinator disappear and clean up too.
+    from orchestrator.phase_diagnostics import TraceMetadata
+
+    store = records(state)
+    started = datetime.now(UTC)
+    clock = time.monotonic()
+    metadata = TraceMetadata()
+    task_id = (command[6] if len(command) > 6 and command[1:3] ==
+               ["-m", "orchestrator.subscription_runner"] and command[5] in
+               {"step", "publish"} and re.fullmatch(r"[0-9a-f]{32}", command[6]) else None)
+    record = {"id": "last-phase", "task_id": task_id,
+              "started_at": started.isoformat(), "outcome": "running"}
+    previous = load_diagnostic(store, "last-phase")
+    if previous and previous["outcome"] == "running":
+        save_diagnostic(store, "last-phase-failure", dict(previous, id="last-phase-failure",
+                        outcome="interrupted_before_recording_exit"))
+    save_diagnostic(store, "last-phase", record)
+    # Guards clean up nested CLI/Docker sessions when their coordinator disappears.
     guard = Path(__file__).parents[1] / "providers" / "_cli_guard.py"
-    child = subprocess.Popen([sys.executable, str(guard), str(os.getpid()), "[]", *command],
-        cwd=Path(__file__).parents[1], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, start_new_session=True)
-    deadline = time.monotonic() + timeout
+    child = None
+    complete = False
+    result, outcome = None, "launch_error"
+    cleanup_error = None
+
+    def drain():
+        nonlocal complete
+        # Bound work per iteration so an endless writer cannot starve cancellation.
+        for _ in range(16):
+            try:
+                chunk = os.read(child.stderr.fileno(), 4096)
+            except BlockingIOError:
+                return
+            if not chunk:
+                complete = True
+                return
+            metadata.feed(chunk)
+
     try:
-        while child.poll() is None:
+        child = subprocess.Popen([sys.executable, str(guard), str(os.getpid()), "[]", *command],
+            cwd=Path(__file__).parents[1], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, start_new_session=True)
+        os.set_blocking(child.stderr.fileno(), False)
+        outcome = "coordinator_error"
+        deadline = clock + timeout
+        while True:
+            drain()
+            result = child.poll()
+            if result is not None:
+                outcome = "success" if result == 0 else "nonzero_exit"
+                return result
             if stopping() or (state / "supervisor" / "cancel").exists():
+                outcome = "stopped"
                 return None
             if time.monotonic() >= deadline:
-                return 124
-            time.sleep(0.1)
-        return child.returncode
+                result, outcome = 124, "timeout"
+                return result
+            time.sleep(0.01)
+    except Exception as exc:
+        kind = type(exc).__name__
+        metadata.exception_type = kind if kind in EXCEPTIONS else None
+        raise
     finally:
-        terminate(child)
+        if child is not None:
+            try:
+                # terminate signals only a still-live, unreaped leader's group.
+                # Never signal a numeric group after poll/wait has reaped its leader.
+                terminate(child)
+            except OSError as exc:
+                cleanup_error = type(exc).__name__
+            except subprocess.TimeoutExpired:
+                cleanup_error = "TimeoutExpired"
+            try:
+                until = time.monotonic() + .2
+                while not complete and time.monotonic() < until:
+                    drain()
+                    if not complete:
+                        time.sleep(.01)
+            except OSError as exc:
+                cleanup_error = type(exc).__name__
+            finally:
+                try:
+                    child.stderr.close()
+                except OSError as exc:
+                    cleanup_error = type(exc).__name__
+        ended = datetime.now(UTC)
+        record.update(outcome=outcome, exit_code=result, ended_at=ended.isoformat(),
+                      wall_elapsed_seconds=(ended - started).total_seconds(),
+                      monotonic_elapsed_seconds=max(0, time.monotonic() - clock),
+                      stderr_complete=complete, cleanup_error=cleanup_error, **metadata.finish())
+        save_diagnostic(store, "last-phase", record)
+        if outcome != "success" or cleanup_error:
+            save_diagnostic(store, "last-phase-failure", dict(record, id="last-phase-failure"))
 
 
 def tick(state, config, stopping, *, phase=run_phase, now=time.time):
