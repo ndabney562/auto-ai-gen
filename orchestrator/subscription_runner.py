@@ -24,8 +24,37 @@ from orchestrator.provider_state import load_provider_health, record_provider_er
 from orchestrator.runtime import available_health, default_factories
 from orchestrator.scheduler import dispatch_task
 from orchestrator.store import JsonTaskStore
-from providers.errors import normalize_sdk_error
+from providers.errors import ProviderFailure, normalize_sdk_error
 from providers.subscription_limits import LIMIT_FAILURES
+
+
+class InvalidReviewResponse(ValueError):
+    """The reviewer returned an invalid JSON envelope, not an authentication error."""
+
+
+def parse_review_response(output):
+    """Accept JSON or one complete JSON code fence; never extract from prose."""
+    if not isinstance(output, str):
+        raise InvalidReviewResponse('Review must be text')
+    text = output.strip()
+    lines = text.split('\n')
+    if len(lines) >= 3 and lines[0].rstrip('\r') in {'```json', '```'} and lines[-1] == '```':
+        text = '\n'.join(lines[1:-1])
+    def unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise InvalidReviewResponse('Duplicate review key')
+            result[key] = value
+        return result
+
+    try:
+        verdict = json.loads(text, object_pairs_hook=unique_fields)
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise InvalidReviewResponse('Review must contain one JSON object') from exc
+    if not isinstance(verdict, dict):
+        raise InvalidReviewResponse('Review must be a JSON object')
+    return verdict
 
 
 def git(repo: Path, *args: str, text: str | None = None, strip: bool = True) -> str:
@@ -294,10 +323,16 @@ def _advance(state, task_id, image, factories, health, validator):
         task = _save(store, task, dict(task, checkpoint=dict(checkpoint)))
         try:
             result = factories[reviewer]().execute({"prompt": prompt})
-            verdict = json.loads(result.output)
-            if not isinstance(verdict, dict):
-                raise TypeError("Review must be a JSON object")
+            verdict = parse_review_response(result.output)
         except Exception as exc:  # noqa: BLE001 - persist only classified metadata
+            if isinstance(exc, InvalidReviewResponse):
+                checkpoint["resume_phase"] = "REVIEW"
+                checkpoint["review_error"] = {"kind": "invalid_review_response"}
+                retry = count < 3
+                return _save(store, task, dict(task,
+                    status="WAIT_RETRY" if retry else "WAIT_HUMAN", checkpoint=checkpoint,
+                    retry_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
+                    next_action={"type": "retry_review" if retry else "inspect_review_response"}))
             classified = normalize_sdk_error(exc)
             record_provider_error(state / "provider-health.json", reviewer, classified)
             checkpoint["resume_phase"] = "REVIEW"
@@ -313,7 +348,9 @@ def _advance(state, task_id, image, factories, health, validator):
             retry = classified.retryable and count < 3
             return _save(store, task, dict(task, status="WAIT_RETRY" if retry else "WAIT_HUMAN",
                 checkpoint=checkpoint, retry_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
-                next_action={"type": "retry_review" if retry else "repair_review_authentication"}))
+                next_action={"type": "retry_review" if retry else ("repair_review_authentication"
+                    if classified.kind == ProviderFailure.AUTH_FAILURE else "inspect_review_failure")}))
+        checkpoint.pop("review_error", None)
         if (verdict.get("approved") is not True or verdict.get("candidate_sha") != sha
                 or not isinstance(verdict.get("reason"), str) or not verdict["reason"].strip()):
             return _repair(store, task, checkpoint, "Independent review rejected candidate")
@@ -333,6 +370,7 @@ def _repair(store, task, checkpoint, reason):
     checkpoint.pop("resume_phase", None)
     checkpoint.pop("review_attempt", None)
     checkpoint.pop("review", None)
+    checkpoint.pop("review_error", None)
     checkpoint["known_failures"] = [*checkpoint.get("known_failures", []), str(reason)[-16000:]]
     return _save(store, task, dict(task, status="REPAIR", checkpoint=checkpoint, validation=None,
                                   next_action={"type": "repair_candidate"}))
