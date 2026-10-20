@@ -299,3 +299,101 @@ def test_invalid_traceback_path_does_not_interrupt_phase():
     trace.feed(b'ValueError: private\n')
     assert trace.finish()['exception_type'] == 'ValueError'
     assert trace.finish()['frames'] == []
+
+
+def test_enrolled_failures_are_isolated_replaced_and_retained_after_success(tmp_path, monkeypatch):
+    from orchestrator import task_queue as q
+    from orchestrator.phase_diagnostics import load_task_failure, task_failure_name
+    from tests.test_task_queue import setup
+
+    a, b = 'a' * 32, 'b' * 32
+    setup(tmp_path, (a, b))
+    q.enqueue(tmp_path, a)
+    q.enqueue(tmp_path, b)
+    original_spawn = s.subprocess.Popen
+    code = "import sys; sys.stderr.write('raw-stderr-secret\\n'); raise ValueError('exception-secret')"
+
+    def spawn(argv, **kwargs):
+        # Keep the validated runner labels, but execute a local subprocess fixture.
+        return original_spawn([sys.executable, '-c', code], **kwargs)
+
+    monkeypatch.setattr(s.subprocess, 'Popen', spawn)
+
+    def run(task_id, operation='step'):
+        command = [sys.executable, '-m', 'orchestrator.subscription_runner', '--state',
+                   str(tmp_path), operation, task_id, '--prompt', 'prompt-secret']
+        return s.run_phase(tmp_path, command, lambda: False)
+
+    store = s.records(tmp_path)
+    assert run(a) == 1
+    first_a = load_task_failure(store, a)
+    assert first_a['exception_type'] == 'ValueError'
+    assert run(b) == 1
+    first_b = load_task_failure(store, b)
+    assert first_b['task_id'] == b
+    assert load_task_failure(store, a) == first_a
+    assert s.status(tmp_path)['last_phase_failure']['task_id'] == b
+    code = "raise RuntimeError('replacement-secret')"
+    assert run(a, 'publish') == 1
+    latest_a = load_task_failure(store, a)
+    assert latest_a['exception_type'] == 'RuntimeError'
+    assert latest_a['operation'] == 'publish'
+    assert latest_a != first_a
+    assert load_task_failure(store, b) == first_b
+    code = 'pass'
+    assert run(a) == 0
+    assert load_task_failure(store, a) == latest_a
+    assert load_task_failure(store, b) == first_b
+    status = s.status(tmp_path)
+    assert status['last_phase']['outcome'] == 'success'
+    assert status['last_phase_failure']['operation'] == 'publish'
+    assert [row['last_phase_failure'] for row in status['tasks']] == [latest_a, first_b]
+    paths = sorted((tmp_path / 'supervisor').glob('last-phase-failure-*.json'))
+    assert {path.stem for path in paths} == {task_failure_name(a), task_failure_name(b)}
+    encoded = ''.join(path.read_text() for path in paths)
+    for secret in ('raw-stderr-secret', 'exception-secret', 'replacement-secret',
+                   'prompt-secret', code, sys.executable, str(tmp_path)):
+        assert secret not in encoded
+    for record in (latest_a, first_b):
+        assert not {'command', 'argv', 'prompt', 'stderr', 'message'} & record.keys()
+
+
+def test_interrupted_enrolled_failure_belongs_to_original_task(tmp_path):
+    from orchestrator import task_queue as q
+    from orchestrator.phase_diagnostics import load_task_failure
+    from tests.test_task_queue import setup
+
+    a, b = 'a' * 32, 'b' * 32
+    setup(tmp_path, (a, b))
+    q.enqueue(tmp_path, a)
+    q.enqueue(tmp_path, b)
+    store = s.records(tmp_path)
+    store.save('last-phase', {'id': 'last-phase', 'task_id': a, 'operation': 'publish',
+                             'outcome': 'running', 'prompt': 'prompt-secret',
+                             'exception_type': 'exception-secret'})
+    assert s.run_phase(tmp_path, [sys.executable, '-c', 'pass'], lambda: False) == 0
+    failure = load_task_failure(store, a)
+    assert failure['outcome'] == 'interrupted_before_recording_exit'
+    assert failure['operation'] == 'publish'
+    assert 'secret' not in json.dumps(failure)
+    assert load_task_failure(store, b) is None
+
+
+@pytest.mark.parametrize('task_id', ['../escape', 'A' * 32, 'a' * 32 + '\n', '', None, []])
+def test_invalid_task_ids_never_produce_diagnostic_paths(task_id):
+    from orchestrator.phase_diagnostics import task_failure_name
+    assert task_failure_name(task_id) is None
+
+
+def test_unenrolled_generated_task_does_not_allocate_failure_slot(tmp_path, monkeypatch):
+    from orchestrator.phase_diagnostics import task_failure_name
+    def denied(*args, **kwargs):
+        raise PermissionError('exception-secret')
+    monkeypatch.setattr(s.subprocess, 'Popen', denied)
+    task_id = 'a' * 32
+    command = [sys.executable, '-m', 'orchestrator.subscription_runner', '--state',
+               str(tmp_path), 'step', task_id]
+    with pytest.raises(PermissionError):
+        s.run_phase(tmp_path, command, lambda: False)
+    assert not (tmp_path / 'supervisor' / (task_failure_name(task_id) + '.json')).exists()
+    assert s.records(tmp_path).load('last-phase-failure')['exception_type'] == 'PermissionError'

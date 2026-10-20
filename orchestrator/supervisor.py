@@ -21,7 +21,12 @@ from pathlib import Path
 
 from orchestrator import task_queue
 from orchestrator.github_publish import GitHubPublisher
-from orchestrator.phase_diagnostics import EXCEPTIONS, load_diagnostic, save_diagnostic
+from orchestrator.phase_diagnostics import (
+    EXCEPTIONS,
+    load_diagnostic,
+    save_diagnostic,
+    save_task_failure,
+)
 from orchestrator.store import JsonTaskStore
 
 PAUSED = {"WAIT_HUMAN", "BLOCKED", "DONE", "CANCELLED", "FAILED_PERMANENT"}
@@ -36,9 +41,23 @@ def records(state):
     return JsonTaskStore(state / "supervisor")
 
 
+def record_failure(store, record):
+    """Preserve the global failure and an enrolled task's independent slot."""
+    save_diagnostic(store, "last-phase-failure", dict(record, id="last-phase-failure"))
+    try:
+        queue = store.load("queue")
+    except (OSError, ValueError, TypeError):
+        return
+    if not isinstance(queue, dict) or not isinstance(queue.get("jobs"), list):
+        return
+    if any(isinstance(job, dict) and job.get("task_id") == record.get("task_id")
+           for job in queue["jobs"]):
+        save_task_failure(store, record)
+
+
 def configure(state: Path, task_id: str | None, repository: str, image: str, *, merge=False,
               interval=30) -> None:
-    GitHubPublisher(repository)  # validate before persisting any configuration
+    GitHubPublisher(repository)
     if not IMAGE_ID.fullmatch(image):
         raise ValueError("An immutable local sha256 image ID is required")
     if not 5 <= interval <= 3600:
@@ -185,8 +204,7 @@ def run_phase(state, command, stopping, *, timeout=1200):
     previous = load_diagnostic(store, "last-phase")
     if previous and previous["outcome"] == "running":
         previous.setdefault("operation", None)
-        save_diagnostic(store, "last-phase-failure", dict(previous, id="last-phase-failure",
-                        outcome="interrupted_before_recording_exit"))
+        record_failure(store, dict(previous, outcome="interrupted_before_recording_exit"))
     save_diagnostic(store, "last-phase", record)
     # Guards clean up nested CLI/Docker sessions when their coordinator disappears.
     guard = Path(__file__).parents[1] / "providers" / "_cli_guard.py"
@@ -235,8 +253,7 @@ def run_phase(state, command, stopping, *, timeout=1200):
     finally:
         if child is not None:
             try:
-                # terminate signals only a still-live, unreaped leader's group.
-                # Never signal a numeric group after poll/wait has reaped its leader.
+                # Never signal a numeric group after its leader has been reaped.
                 terminate(child)
             except OSError as exc:
                 cleanup_error = type(exc).__name__
@@ -262,7 +279,7 @@ def run_phase(state, command, stopping, *, timeout=1200):
                       stderr_complete=complete, cleanup_error=cleanup_error, **metadata.finish())
         save_diagnostic(store, "last-phase", record)
         if outcome != "success" or cleanup_error:
-            save_diagnostic(store, "last-phase-failure", dict(record, id="last-phase-failure"))
+            record_failure(store, record)
 
 
 def tick(state, config, stopping, *, phase=run_phase, now=time.time):

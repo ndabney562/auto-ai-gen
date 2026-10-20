@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from pathlib import Path
 
@@ -14,6 +15,12 @@ EXCEPTIONS = frozenset({
     'TypeError', 'ValueError',
 })
 FRAME = re.compile(r'  File "([^"\n]+)", line ([0-9]{1,7}), in ([A-Za-z_][A-Za-z_0-9]{0,79}|<module>)\Z')
+TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
+TIMESTAMP = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?\+00:00\Z')
+FAILURE_OUTCOMES = frozenset({
+    'nonzero_exit', 'timeout', 'stopped', 'launch_error', 'coordinator_error',
+    'interrupted_before_recording_exit', 'success',
+})
 
 
 class TraceMetadata:
@@ -87,3 +94,84 @@ def save_diagnostic(store, name, value):
         store.save(name, value)
     except (OSError, ValueError, TypeError):
         logging.getLogger(__name__).warning('Phase diagnostic could not be saved')
+
+
+def task_failure_name(task_id):
+    """One deterministic, store-safe slot for each generated task ID."""
+    if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
+        return None
+    return 'last-phase-failure-' + task_id
+
+
+def sanitized_task_failure(value):
+    """Project even recovered records onto bounded, allowlisted metadata."""
+    if not isinstance(value, dict):
+        return None
+    name = task_failure_name(value.get('task_id'))
+    outcome = value.get('outcome')
+    if name is None or not isinstance(outcome, str) or outcome not in FAILURE_OUTCOMES:
+        return None
+    result = {'id': name, 'task_id': value['task_id'], 'outcome': outcome,
+              'operation': None}
+    if value.get('operation') in ('step', 'publish'):
+        result['operation'] = value['operation']
+    for key in ('started_at', 'ended_at'):
+        item = value.get(key)
+        if isinstance(item, str) and TIMESTAMP.fullmatch(item):
+            result[key] = item
+    for key in ('wall_elapsed_seconds', 'monotonic_elapsed_seconds'):
+        item = value.get(key)
+        if type(item) in (int, float):
+            try:
+                finite = math.isfinite(item)
+            except OverflowError:
+                finite = False
+            if finite and (key == 'wall_elapsed_seconds' or item >= 0):
+                result[key] = item
+    if 'exit_code' in value:
+        item = value['exit_code']
+        if item is None or (type(item) is int and -(2 ** 31) <= item < 2 ** 31):
+            result['exit_code'] = item
+    if type(value.get('stderr_complete')) is bool:
+        result['stderr_complete'] = value['stderr_complete']
+    item = value.get('stderr_bytes')
+    if type(item) is int and 0 <= item < 2 ** 63:
+        result['stderr_bytes'] = item
+    for key in ('exception_type', 'cleanup_error'):
+        if key in value:
+            item = value[key]
+            result[key] = item if isinstance(item, str) and item in EXCEPTIONS else None
+    if 'frames' in value:
+        frames = value['frames']
+        result['frames'] = []
+        if isinstance(frames, list):
+            for frame in frames[-8:]:
+                if not isinstance(frame, dict):
+                    continue
+                file, line = frame.get('file'), frame.get('line')
+                if (isinstance(file, str)
+                        and re.fullmatch(r'(orchestrator|providers)/[A-Za-z_][A-Za-z_0-9]*\.py', file)
+                        and (ROOT / file).is_file()
+                        and type(line) is int and 0 <= line <= 9999999):
+                    result['frames'].append({'file': file, 'line': line})
+    if outcome == 'success' and not result.get('cleanup_error'):
+        return None
+    return result
+
+
+def save_task_failure(store, value):
+    record = sanitized_task_failure(value)
+    if record is not None:
+        save_diagnostic(store, record['id'], record)
+
+
+def load_task_failure(store, task_id):
+    name = task_failure_name(task_id)
+    if name is None:
+        return None
+    value = load_diagnostic(store, name)
+    record = sanitized_task_failure(value)
+    # Reject wrong-task, malformed, or unexpectedly extended records in summaries.
+    if record is None or record['task_id'] != task_id or record != value:
+        return None
+    return record
