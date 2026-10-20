@@ -425,6 +425,7 @@ def test_nonlimit_review_errors_still_exhaust_budget(setup_task, monkeypatch):
             current[0] += timedelta(minutes=2)
             assert advance_task(state, task_id)['status'] == 'REVIEW'
     assert task['status'] == 'WAIT_HUMAN'
+    assert task['next_action']['type'] == 'inspect_review_failure'
 
 
 @pytest.mark.parametrize('wrapper', ['plain', 'json-fence', 'bare-fence', 'crlf-fence'])
@@ -484,6 +485,8 @@ def test_invalid_review_format_exhausts_without_fake_provider_outage(setup_task)
     assert result['status'] == 'WAIT_HUMAN'
     assert result['next_action']['type'] == 'inspect_review_response'
     assert 'private-invalid-prose' not in json.dumps(result)
+    assert 'private-invalid-prose' not in (state / 'tasks' / f'{task_id}.json').read_text()
+    assert 'private-invalid-prose' not in (state / 'audit.jsonl').read_text()
     assert not (state / 'provider-health.json').exists()
 
 
@@ -513,3 +516,53 @@ def test_review_rejects_duplicate_approval_keys():
     from orchestrator.subscription_runner import InvalidReviewResponse, parse_review_response
     with pytest.raises(InvalidReviewResponse):
         parse_review_response('```json\n{"approved":false,"approved":true}\n```')
+
+
+def test_review_deep_nesting_is_format_error():
+    from orchestrator.subscription_runner import InvalidReviewResponse, parse_review_response
+    with pytest.raises(InvalidReviewResponse):
+        parse_review_response('[' * 100000)
+
+
+def test_review_auth_failure_keeps_authentication_action(setup_task):
+    _, state, task_id = setup_task
+    class AuthError:
+        def execute(self, handoff):
+            raise ProviderExecutionError('private', ClassifiedProviderError(
+                ProviderFailure.AUTH_FAILURE, False))
+    kwargs = {'factories': {'openai': Implementer, 'anthropic': AuthError},
+              'health': [ProviderHealth('openai'), ProviderHealth('anthropic')],
+              'validator': validated}
+    advance_task(state, task_id, **kwargs)
+    advance_task(state, task_id, **kwargs)
+    result = advance_task(state, task_id, **kwargs)
+    assert result['status'] == 'WAIT_HUMAN'
+    assert result['next_action']['type'] == 'repair_review_authentication'
+
+
+def test_valid_fenced_review_after_format_error_clears_metadata(setup_task):
+    _, state, task_id = setup_task
+    class FirstInvalid(Reviewer):
+        count = 0
+        def execute(self, handoff):
+            type(self).count += 1
+            if self.count == 1:
+                return WorkerResult('invalid-private-response')
+            r = super().execute(handoff)
+            return WorkerResult('```json\n' + r.output + '\n```')
+    kwargs = {'factories': {'openai': Implementer, 'anthropic': FirstInvalid},
+              'health': [ProviderHealth('openai'), ProviderHealth('anthropic')],
+              'validator': validated}
+    advance_task(state, task_id, **kwargs)
+    advance_task(state, task_id, **kwargs)
+    task = advance_task(state, task_id, **kwargs)
+    assert task['status'] == 'WAIT_RETRY'
+    task.pop('retry_at')
+    JsonTaskStore(state / 'tasks').save(task_id, task)
+    assert advance_task(state, task_id, **kwargs)['status'] == 'REVIEW'
+    result = advance_task(state, task_id, **kwargs)
+    assert result['status'] == 'WAIT_CI'
+    assert result['checkpoint']['review_attempt'] == 2
+    assert 'review_error' not in result['checkpoint']
+    assert not (state / 'provider-health.json').exists()
+    assert 'invalid-private-response' not in (state / 'tasks' / f'{task_id}.json').read_text()

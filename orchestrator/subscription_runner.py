@@ -24,7 +24,7 @@ from orchestrator.provider_state import load_provider_health, record_provider_er
 from orchestrator.runtime import available_health, default_factories
 from orchestrator.scheduler import dispatch_task
 from orchestrator.store import JsonTaskStore
-from providers.errors import normalize_sdk_error
+from providers.errors import ProviderFailure, normalize_sdk_error
 from providers.subscription_limits import LIMIT_FAILURES
 
 
@@ -50,7 +50,7 @@ def parse_review_response(output):
 
     try:
         verdict = json.loads(text, object_pairs_hook=unique_fields)
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, RecursionError) as exc:
         raise InvalidReviewResponse('Review must contain one JSON object') from exc
     if not isinstance(verdict, dict):
         raise InvalidReviewResponse('Review must be a JSON object')
@@ -349,7 +349,7 @@ def _advance(state, task_id, image, factories, health, validator):
             return _save(store, task, dict(task, status="WAIT_RETRY" if retry else "WAIT_HUMAN",
                 checkpoint=checkpoint, retry_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
                 next_action={"type": "retry_review" if retry else ("repair_review_authentication"
-                    if classified.kind.value == "AUTH_FAILURE" else "inspect_review_failure")}))
+                    if classified.kind == ProviderFailure.AUTH_FAILURE else "inspect_review_failure")}))
         checkpoint.pop("review_error", None)
         if (verdict.get("approved") is not True or verdict.get("candidate_sha") != sha
                 or not isinstance(verdict.get("reason"), str) or not verdict["reason"].strip()):
