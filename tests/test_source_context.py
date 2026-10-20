@@ -56,3 +56,21 @@ def test_initial_source_boundary_is_durable_without_dispatch(tmp_path, content, 
         assert not calls
         assert select_task(state) is None
         assert health(state, task_id)["failures"] == 0
+
+
+def test_larger_blob_safety_failure_remains_an_error(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    (repo / "docs").mkdir()
+    (repo / "docs/a.md").write_text("a" * 40001)
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "base")
+    state = tmp_path / "state"
+    task_id = create_task(state, repo, "Update source", ["docs/a.md"], "HEAD")
+    store = JsonTaskStore(state / "tasks")
+    before = store.load(task_id)
+    with pytest.raises(ValueError, match="Integration context exceeds"):
+        advance_task(state, task_id, factories={"unused": lambda: pytest.fail("dispatch")},
+                     health=[])
+    assert store.load(task_id) == before
