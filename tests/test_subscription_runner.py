@@ -566,3 +566,58 @@ def test_valid_fenced_review_after_format_error_clears_metadata(setup_task):
     assert 'review_error' not in result['checkpoint']
     assert not (state / 'provider-health.json').exists()
     assert 'invalid-private-response' not in (state / 'tasks' / f'{task_id}.json').read_text()
+
+
+@pytest.mark.parametrize('kind,retryable,status,action,attempts', [
+    (ProviderFailure.AUTH_FAILURE, False, 'WAIT_HUMAN', 'repair_review_authentication', 2),
+    (ProviderFailure.OUTAGE, True, 'WAIT_RETRY', 'retry_review', 2),
+    (ProviderFailure.QUOTA_EXHAUSTED, True, 'WAIT_PROVIDER', 'wait_for_subscription_reset', 1),
+])
+def test_provider_error_after_invalid_review_clears_stale_metadata(
+        setup_task, kind, retryable, status, action, attempts):
+    from datetime import UTC, datetime, timedelta
+
+    _, state, task_id = setup_task
+    store = JsonTaskStore(state / 'tasks')
+    class MixedReviewer:
+        calls = 0
+        def execute(self, handoff):
+            type(self).calls += 1
+            if self.calls == 1:
+                return WorkerResult('private-invalid-review')
+            raise ProviderExecutionError('private-provider-error', ClassifiedProviderError(
+                kind, retryable, 180 if kind == ProviderFailure.QUOTA_EXHAUSTED else None,
+                'private-provider-detail'))
+    kwargs = {'factories': {'openai': Implementer, 'anthropic': MixedReviewer},
+              'health': [ProviderHealth('openai'), ProviderHealth('anthropic')],
+              'validator': validated}
+    advance_task(state, task_id, **kwargs)
+    advance_task(state, task_id, **kwargs)
+    malformed = advance_task(state, task_id, **kwargs)
+    assert malformed['status'] == 'WAIT_RETRY'
+    assert malformed['checkpoint']['review_attempt'] == 1
+    assert malformed['checkpoint']['review_error'] == {'kind': 'invalid_review_response'}
+    assert not (state / 'provider-health.json').exists()
+    malformed.pop('retry_at')
+    store.save(task_id, malformed)
+    assert advance_task(state, task_id, **kwargs)['status'] == 'REVIEW'
+    before = datetime.now(UTC)
+    result = advance_task(state, task_id, **kwargs)
+    assert result['status'] == status
+    assert result['next_action']['type'] == action
+    assert result['checkpoint']['review_attempt'] == attempts
+    assert result['attempt'] == malformed['attempt']
+    assert 'review_error' not in result['checkpoint']
+    assert result['checkpoint']['resume_phase'] == 'REVIEW'
+    health = json.loads((state / 'provider-health.json').read_text())['anthropic']
+    assert health['state'] == kind.value
+    if kind == ProviderFailure.QUOTA_EXHAUSTED:
+        assert datetime.fromisoformat(result['retry_at']) >= before + timedelta(seconds=180)
+        assert result['retry_at'] == health['retry_at']
+    for path in (state / 'tasks' / f'{task_id}.json', state / 'provider-health.json',
+                 state / 'audit.jsonl'):
+        text = path.read_text()
+        assert 'private-invalid-review' not in text
+        assert 'private-provider-error' not in text
+        assert 'private-provider-detail' not in text
+    assert MixedReviewer.calls == 2
