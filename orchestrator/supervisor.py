@@ -170,13 +170,21 @@ def run_phase(state, command, stopping, *, timeout=1200):
     started = datetime.now(UTC)
     clock = time.monotonic()
     metadata = TraceMetadata()
-    task_id = (command[6] if len(command) > 6 and command[1:3] ==
-               ["-m", "orchestrator.subscription_runner"] and command[5] in
-               {"step", "publish"} and re.fullmatch(r"[0-9a-f]{32}", command[6]) else None)
-    record = {"id": "last-phase", "task_id": task_id,
+    # Extract only allowlisted metadata from the runner's positional structure.
+    # Never infer labels from arbitrary command text or stderr.
+    task_id, operation = None, None
+    if (isinstance(command, (list, tuple)) and len(command) > 6
+            and command[0] == sys.executable
+            and list(command[1:5]) ==
+            ["-m", "orchestrator.subscription_runner", "--state", str(state)]
+            and isinstance(command[5], str) and command[5] in {"step", "publish"}
+            and isinstance(command[6], str) and re.fullmatch(r"[0-9a-f]{32}", command[6])):
+        task_id, operation = command[6], command[5]
+    record = {"id": "last-phase", "task_id": task_id, "operation": operation,
               "started_at": started.isoformat(), "outcome": "running"}
     previous = load_diagnostic(store, "last-phase")
     if previous and previous["outcome"] == "running":
+        previous.setdefault("operation", None)
         save_diagnostic(store, "last-phase-failure", dict(previous, id="last-phase-failure",
                         outcome="interrupted_before_recording_exit"))
     save_diagnostic(store, "last-phase", record)
