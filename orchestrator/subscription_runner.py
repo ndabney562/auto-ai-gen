@@ -333,6 +333,7 @@ def _advance(state, task_id, image, factories, health, validator):
                     status="WAIT_RETRY" if retry else "WAIT_HUMAN", checkpoint=checkpoint,
                     retry_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
                     next_action={"type": "retry_review" if retry else "inspect_review_response"}))
+            checkpoint.pop("review_error", None)
             classified = normalize_sdk_error(exc)
             record_provider_error(state / "provider-health.json", reviewer, classified)
             checkpoint["resume_phase"] = "REVIEW"
