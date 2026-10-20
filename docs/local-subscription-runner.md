@@ -119,3 +119,10 @@ boolean approval, exact candidate SHA, independent-provider or validation gates.
 Malformed responses consume the bounded review-attempt budget and stop at
 `inspect_review_response`; they do not mark provider authentication or availability
 as failed. Raw reviewer text is not stored in the failure checkpoint.
+
+Initial source above 24000 bytes but within the existing 40000-byte blob ceiling
+enters durable `BLOCKED` with
+`inspect_source_context` and `source_size_limit`, before dispatching a worker.
+The task retains its checkpoint and attempt count; the queue skips it until an
+operator resolves the source context. Existing source, repair and blob limits apply. Blobs above 40000 bytes still fail
+the separate blob safety check before this source-context check.
