@@ -40,6 +40,8 @@ def test_phase_failure_retains_metadata_after_success(tmp_path):
     assert s.run_phase(tmp_path, command, lambda: False) == 1
     failure = s.records(tmp_path).load('last-phase-failure')
     assert failure['outcome'] == 'nonzero_exit'
+    assert failure['operation'] is None
+    assert failure['task_id'] is None
     assert failure['exception_type'] == 'ValueError'
     assert failure['exit_code'] == 1
     assert failure['stderr_complete']
@@ -47,14 +49,16 @@ def test_phase_failure_retains_metadata_after_success(tmp_path):
     assert s.run_phase(tmp_path, [sys.executable, '-c', 'pass'], lambda: False) == 0
     assert s.records(tmp_path).load('last-phase-failure') == failure
     assert s.records(tmp_path).load('last-phase')['outcome'] == 'success'
+    assert s.records(tmp_path).load('last-phase')['operation'] is None
 
 
 def test_interrupted_record_survives_next_phase(tmp_path):
     s.records(tmp_path).save('last-phase', {'id': 'last-phase', 'outcome': 'running',
                                          'task_id': 'retained-task'})
     assert s.run_phase(tmp_path, [sys.executable, '-c', 'pass'], lambda: False) == 0
-    assert s.records(tmp_path).load('last-phase-failure')['outcome'] == (
-        'interrupted_before_recording_exit')
+    failure = s.records(tmp_path).load('last-phase-failure')
+    assert failure['outcome'] == 'interrupted_before_recording_exit'
+    assert failure['operation'] is None
 
 
 @pytest.mark.parametrize('stop,timeout,outcome,code', [
@@ -166,8 +170,98 @@ def test_runner_task_id_and_trusted_frame_are_visible_in_status(tmp_path):
     status = s.status(tmp_path)
     record = status['last_phase_failure']
     assert record['task_id'] == task_id
+    assert record['operation'] == 'step'
     assert record['exception_type'] == 'KeyError'
     assert any(frame['file'] == 'orchestrator/subscription_runner.py' for frame in record['frames'])
+
+
+@pytest.mark.parametrize('operation,task_status', [('step', 'READY'), ('publish', 'WAIT_CI')])
+def test_generated_phase_operation_is_saved_before_and_after_launch(
+        tmp_path, monkeypatch, operation, task_status):
+    task_id = 'a' * 32
+    config = {'task_id': task_id, 'repository': 'private/repository-secret',
+              'image': 'sha256:' + 'b' * 64, 'merge': True}
+    command = s.phase_command(tmp_path, config, {'status': task_status})
+
+    def denied(argv, **kwargs):
+        running = s.records(tmp_path).load('last-phase')
+        assert running['outcome'] == 'running'
+        assert running['operation'] == operation
+        assert running['task_id'] == task_id
+        assert argv[-len(command):] == command
+        raise PermissionError('raw-stderr-secret')
+
+    monkeypatch.setattr(s.subprocess, 'Popen', denied)
+    with pytest.raises(PermissionError):
+        s.run_phase(tmp_path, command, lambda: False)
+    for name in ('last-phase', 'last-phase-failure'):
+        record = s.records(tmp_path).load(name)
+        assert record['operation'] == operation
+        assert record['task_id'] == task_id
+        encoded = json.dumps(record)
+        for private in (str(tmp_path), config['repository'], config['image'],
+                        sys.executable, 'subscription_runner', 'raw-stderr-secret'):
+            assert private not in encoded
+        assert 'argv' not in record
+        assert 'command' not in record
+        assert 'stderr' not in record
+
+
+@pytest.mark.parametrize('case', [
+    'empty', 'short', 'unrelated', 'executable', 'module', 'flag', 'state',
+    'operation', 'task', 'uppercase_task', 'trailing_task', 'nonstring_task',
+    'nonstring_operation', 'command_string',
+])
+def test_untrusted_or_malformed_command_has_no_runner_metadata(tmp_path, monkeypatch, case):
+    command = [sys.executable, '-m', 'orchestrator.subscription_runner', '--state',
+               str(tmp_path), 'publish', 'a' * 32]
+    if case == 'empty':
+        command = []
+    elif case == 'short':
+        command = command[:6]
+    elif case == 'unrelated':
+        command = [sys.executable, '-c', "print('step publish private-secret')"]
+    elif case == 'command_string':
+        command = ' '.join(command)
+    else:
+        index, value = {
+            'executable': (0, '/private/python-secret'),
+            'module': (2, 'private.module'),
+            'flag': (3, '--private-secret'),
+            'state': (4, str(tmp_path / 'other-secret')),
+            'operation': (5, 'create'),
+            'task': (6, 'private-task-secret'),
+            'uppercase_task': (6, 'A' * 32),
+            'trailing_task': (6, 'a' * 32 + '\n'),
+            'nonstring_task': (6, None),
+            'nonstring_operation': (5, []),
+        }[case]
+        command[index] = value
+
+    def denied(*args, **kwargs):
+        raise PermissionError('private-secret')
+
+    monkeypatch.setattr(s.subprocess, 'Popen', denied)
+    with pytest.raises(PermissionError):
+        s.run_phase(tmp_path, command, lambda: False)
+    for name in ('last-phase', 'last-phase-failure'):
+        record = s.records(tmp_path).load(name)
+        assert record['operation'] is None
+        assert record['task_id'] is None
+        assert 'private' not in json.dumps(record)
+
+
+@pytest.mark.parametrize('operation', ['step', 'publish'])
+def test_interrupted_phase_retains_original_operation(tmp_path, operation):
+    s.records(tmp_path).save('last-phase', {
+        'id': 'last-phase', 'outcome': 'running', 'task_id': 'a' * 32,
+        'operation': operation})
+    assert s.run_phase(tmp_path, [sys.executable, '-c', 'pass'], lambda: False) == 0
+    failure = s.records(tmp_path).load('last-phase-failure')
+    assert failure['outcome'] == 'interrupted_before_recording_exit'
+    assert failure['operation'] == operation
+    assert failure['task_id'] == 'a' * 32
+    assert s.records(tmp_path).load('last-phase')['operation'] is None
 
 
 def test_cleanup_signal_failure_does_not_hide_timeout(tmp_path, monkeypatch):
