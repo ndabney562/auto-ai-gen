@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from orchestrator.phase_diagnostics import load_task_failure
 from orchestrator.store import JsonTaskStore
 
 PAUSED = {'DONE', 'CANCELLED', 'FAILED_PERMANENT', 'WAIT_HUMAN', 'BLOCKED'}
@@ -91,6 +92,7 @@ def select_task(state, *, now=None):
 
 def summary(state):
     tasks = {t['id']: t for t in JsonTaskStore(state / 'tasks').list_tasks()}
+    diagnostics = JsonTaskStore(state / 'supervisor')
     with locked_queue(state) as queue:
         rows = []
         status_counts = {}
@@ -104,6 +106,7 @@ def summary(state):
                                          if tasks.get(dep, {}).get('status') != 'DONE'],
                 'retry_at': task.get('retry_at'),
                 'next_action': task.get('next_action', {}).get('type'),
+                'last_phase_failure': load_task_failure(diagnostics, job['task_id']),
                 'supervisor': health(state, job['task_id'])})
         return {'active_task': queue['active_task'], 'tasks': rows,
                 'status_counts': status_counts}

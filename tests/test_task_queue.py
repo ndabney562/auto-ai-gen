@@ -126,7 +126,7 @@ def test_cancel_active_phase_only_after_cleanup(tmp_path):
     events = []
 
     def phase(_, command, stopping):
-        s.request(tmp_path, 'cancel')  # resolves the durable active task a
+        s.request(tmp_path, 'cancel')
         assert stopping()
         assert store.load('a')['status'] == 'READY'
         events.append('cleanup')
@@ -161,6 +161,7 @@ def test_queue_status_contains_no_objectives_or_source(tmp_path):
     result = s.status(tmp_path)
     assert result['mode'] == 'queue'
     assert result['tasks'][0]['status'] == 'READY'
+    assert result['tasks'][0]['last_phase_failure'] is None
     assert 'checkpoint' not in result['tasks'][0]
 
 
@@ -233,3 +234,49 @@ def test_summary_status_counts_include_missing_enrolled_records(tmp_path, monkey
     assert [row['status'] for row in result['tasks']] == ['MISSING', 'READY', 'MISSING']
     assert result['status_counts'] == {'MISSING': 2, 'READY': 1}
     assert sum(result['status_counts'].values()) == len(result['tasks']) == 3
+
+
+@pytest.mark.parametrize('corruption', [
+    'missing', 'json', 'list', 'wrong_task', 'wrong_id', 'outcome', 'operation',
+    'secret', 'frames', 'timestamp', 'exception', 'duration',
+])
+def test_summary_returns_null_for_missing_or_corrupt_task_failure(tmp_path, corruption):
+    import json
+
+    from orchestrator.phase_diagnostics import save_task_failure, task_failure_name
+
+    a, b = 'a' * 32, 'b' * 32
+    setup(tmp_path, (a, b))
+    q.enqueue(tmp_path, a)
+    q.enqueue(tmp_path, b)
+    store = s.records(tmp_path)
+    for task_id in (a, b):
+        save_task_failure(store, {'task_id': task_id, 'operation': 'step',
+                                 'outcome': 'nonzero_exit', 'exit_code': 1})
+    path = tmp_path / 'supervisor' / (task_failure_name(a) + '.json')
+    value = json.loads(path.read_text())
+    if corruption == 'missing':
+        path.unlink()
+    elif corruption == 'json':
+        path.write_text('{broken')
+    elif corruption == 'list':
+        path.write_text('[]')
+    else:
+        updates = {
+            'wrong_task': {'task_id': b},
+            'wrong_id': {'id': task_failure_name(b)},
+            'outcome': {'outcome': 'private-secret'},
+            'operation': {'operation': ['private-secret']},
+            'secret': {'prompt': 'private-secret'},
+            'frames': {'frames': [{'file': '/private/secret.py', 'line': 1}]},
+            'timestamp': {'started_at': 'private-secret'},
+            'exception': {'exception_type': 'private-secret'},
+            'duration': {'monotonic_elapsed_seconds': -1},
+        }
+        value.update(updates[corruption])
+        path.write_text(json.dumps(value))
+    rows = s.status(tmp_path)['tasks']
+    assert rows[0]['last_phase_failure'] is None
+    assert rows[1]['last_phase_failure']['task_id'] == b
+    assert rows[1]['last_phase_failure']['exit_code'] == 1
+    assert 'private-secret' not in json.dumps(rows)
